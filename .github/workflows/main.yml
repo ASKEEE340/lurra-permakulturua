@@ -1,0 +1,18 @@
+name: Ejecutar proyecto
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ejecutar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Mostrar estructura
+        run: |
+          echo "Repositorio lurrak-lurrak-permacultura"
+          echo "Flujo de trabajo ejecutado correctamente"
+          find . -maxdepth 2 -type f | sort
