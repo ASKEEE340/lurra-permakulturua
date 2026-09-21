@@ -12,7 +12,8 @@ jobs:
 
       - name: Obtener datos IDENA
         run: curl -L "https://idena.navarra.es/ogc/wfs?service=WFS&request=GetCapabilities" -o idena-capabilities.xml
-
+      - name: Obtener datos de Bera
+        run: curl -L "https://idena.navarra.es/ogc/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=IDENA:OCUPAC_Pol_MCA_VE2000&outputFormat=application/json&count=20&CQL_FILTER=MUNICIPIO='Bera' AND GRUPO='Frondosas'" -o bera-frondosas.json
       - name: Guardar datos IDENA
         uses: actions/upload-artifact@v4
         with:
