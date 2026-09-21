@@ -72,7 +72,78 @@ jobs:
 
           print("Tabla creada: parcelas-bera.csv")
           PY
+      - name: Crear mapa de Bera
+        run: |
+          python - <<'PY'
+          import json
+          import html
 
+          with open("bera-frondosas.json", encoding="utf-8") as f:
+              datos = json.load(f)
+
+          geojson = json.dumps(datos, ensure_ascii=False)
+
+          mapa = f"""<!DOCTYPE html>
+          <html lang="es">
+          <head>
+            <meta charset="utf-8">
+            <title>Frondosas de Bera</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <link rel="stylesheet"
+              href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+            <style>
+              html, body, #map {{
+                height: 100%;
+                margin: 0;
+              }}
+            </style>
+          </head>
+          <body>
+            <div id="map"></div>
+
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+            <script>
+              const datos = {geojson};
+
+              const map = L.map('map');
+
+              L.tileLayer(
+                'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+                {{
+                  attribution: '&copy; OpenStreetMap contributors'
+                }}
+              ).addTo(map);
+
+              const capa = L.geoJSON(datos, {{
+                onEachFeature: function(feature, layer) {{
+                  const p = feature.properties || {{}};
+
+                  layer.bindPopup(
+                    '<b>Recinto:</b> ' + (p.CRECINTO ?? '') +
+                    '<br><b>Tipo:</b> ' + (p.TIPO ?? '') +
+                    '<br><b>Etiqueta:</b> ' + (p.ETIQUETA ?? '') +
+                    '<br><b>Hectáreas:</b> ' + (p.HECTAREAS ?? '')
+                  );
+                }}
+              }}).addTo(map);
+
+              map.fitBounds(capa.getBounds());
+            </script>
+          </body>
+          </html>
+          """
+
+          with open("mapa-bera.html", "w", encoding="utf-8") as f:
+              f.write(mapa)
+
+          print("Mapa creado: mapa-bera.html")
+          PY
+
+      - name: Guardar mapa
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapa-bera
+          path: mapa-bera.html
       - name: Guardar tabla de parcelas
         uses: actions/upload-artifact@v4
         with:
