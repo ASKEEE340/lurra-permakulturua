@@ -46,7 +46,38 @@ jobs:
           print(f"Superficie total: {total:.2f} hectáreas")
           print(f"Número de parcelas: {len(datos['features'])}")
           PY
+      - name: Crear tabla de parcelas
+        run: |
+          python - <<'PY'
+          import json
+          import csv
 
+          with open("bera-frondosas.json", encoding="utf-8") as f:
+              datos = json.load(f)
+
+          with open("parcelas-bera.csv", "w", newline="", encoding="utf-8") as f:
+              escritor = csv.writer(f)
+              escritor.writerow(["Recinto", "Municipio", "Grupo", "Tipo", "Etiqueta", "Hectáreas"])
+
+              for feature in datos["features"]:
+                  p = feature["properties"]
+                  escritor.writerow([
+                      p.get("CRECINTO"),
+                      p.get("MUNICIPIO"),
+                      p.get("GRUPO"),
+                      p.get("TIPO"),
+                      p.get("ETIQUETA"),
+                      p.get("HECTAREAS")
+                  ])
+
+          print("Tabla creada: parcelas-bera.csv")
+          PY
+
+      - name: Guardar tabla de parcelas
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabla-parcelas-bera
+          path: parcelas-bera.csv
       - name: Guardar datos de Bera
         uses: actions/upload-artifact@v4
         with:
