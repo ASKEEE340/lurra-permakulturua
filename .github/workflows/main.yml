@@ -1,119 +1,79 @@
-name: Ejecutar proyecto
+name: Sistema Maestro de la Finca
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 jobs:
-  ejecutar:
+  sistema-maestro:
     runs-on: ubuntu-latest
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Obtener datos IDENA
+      - name: Crear expediente digital
         run: |
-          curl -L "https://idena.navarra.es/ogc/wfs" \
-            --data-urlencode "service=WFS" \
-            --data-urlencode "request=GetCapabilities" \
-            -o idena-capabilities.xml
+          mkdir -p expediente/terreno
+          mkdir -p expediente/agua
+          mkdir -p expediente/clima
+          mkdir -p expediente/suelo
+          mkdir -p expediente/vegetacion
+          mkdir -p expediente/satelite
+          mkdir -p expediente/parcelas
+          mkdir -p expediente/normativa
+          mkdir -p expediente/analisis
+          mkdir -p expediente/informes
 
-      - name: Obtener datos de Bera
+          cat > expediente/finca.json <<'EOF'
+          {
+            "nombre": "Finca",
+            "coordenadas": {
+              "latitud": null,
+              "longitud": null
+            },
+            "estado": "preparada",
+            "agentes": {
+              "terreno": "pendiente",
+              "agua": "pendiente",
+              "clima": "pendiente",
+              "suelo": "pendiente",
+              "vegetacion": "pendiente",
+              "satelite": "pendiente",
+              "parcelas": "pendiente",
+              "normativa": "pendiente",
+              "analista": "pendiente"
+            }
+          }
+          EOF
+
+      - name: Ejecutar Agente Maestro
         run: |
-          curl -L --get "https://idena.navarra.es/ogc/wfs" \
-            --data-urlencode "service=WFS" \
-            --data-urlencode "version=2.0.0" \
-            --data-urlencode "request=GetFeature" \
-            --data-urlencode "typeNames=IDENA:OCUPAC_Pol_MCA_VE2000" \
-            --data-urlencode "outputFormat=application/json" \
-            --data-urlencode "count=1000" \
-            --data-urlencode "CQL_FILTER=MUNICIPIO='Bera' AND GRUPO='Frondosas'" \
-            -o bera-frondosas.json
+          echo "======================================"
+          echo "       AGENTE MAESTRO DE LA FINCA"
+          echo "======================================"
+          echo ""
+          echo "Expediente digital creado."
+          echo ""
+          echo "Agentes preparados:"
+          echo "- Terreno"
+          echo "- Agua"
+          echo "- Clima"
+          echo "- Suelo"
+          echo "- Vegetación"
+          echo "- Satélite"
+          echo "- Parcelas"
+          echo "- Normativa"
+          echo "- Analista"
+          echo ""
+          echo "Siguiente agente: TERRENO"
 
-      - name: Crear mapa
-        run: |
-          python - <<'PY'
-          import json
-
-          with open("bera-frondosas.json", encoding="utf-8") as f:
-              datos = json.load(f)
-
-          geojson = json.dumps(datos, ensure_ascii=False)
-
-          mapa = f"""<!DOCTYPE html>
-          <html lang="es">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Frondosas de Bera</title>
-            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-            <style>
-              html, body, #map {{
-                height: 100%;
-                margin: 0;
-              }}
-            </style>
-          </head>
-          <body>
-            <div id="map"></div>
-            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-            <script>
-              const datos = {geojson};
-              const map = L.map('map');
-
-              L.tileLayer(
-                'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-                {{
-                  attribution: '&copy; OpenStreetMap contributors'
-                }}
-              ).addTo(map);
-
-              const capa = L.geoJSON(datos, {{
-                onEachFeature: function(feature, layer) {{
-                  const p = feature.properties || {{}};
-                  layer.bindPopup(
-                    '<b>Recinto:</b> ' + (p.CRECINTO ?? '') +
-                    '<br><b>Tipo:</b> ' + (p.TIPO ?? '') +
-                    '<br><b>Etiqueta:</b> ' + (p.ETIQUETA ?? '') +
-                    '<br><b>Hectáreas:</b> ' + (p.HECTAREAS ?? '')
-                  );
-                }}
-              }}).addTo(map);
-
-              map.fitBounds(capa.getBounds());
-            </script>
-          </body>
-          </html>"""
-
-          import os
-          os.makedirs("public", exist_ok=True)
-
-          with open("public/index.html", "w", encoding="utf-8") as f:
-              f.write(mapa)
-          PY
-
-      - name: Publicar mapa en GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
-
-      - name: Desplegar GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      - name: Guardar datos de Bera
+      - name: Guardar expediente
         uses: actions/upload-artifact@v4
         with:
-          name: bera-frondosas
-          path: bera-frondosas.json
-
-      - name: Guardar datos IDENA
-        uses: actions/upload-artifact@v4
-        with:
-          name: idena-capabilities
-          path: idena-capabilities.xml
+          name: expediente-finca
+          path: expediente/
