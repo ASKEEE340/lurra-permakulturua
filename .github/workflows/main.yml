@@ -30,17 +30,6 @@ jobs:
             --data-urlencode "CQL_FILTER=MUNICIPIO='Bera' AND GRUPO='Frondosas'" \
             -o bera-frondosas.json
 
-      - name: Guardar datos IDENA
-        uses: actions/upload-artifact@v4
-        with:
-          name: idena-capabilities
-          path: idena-capabilities.xml
-
-      - name: Guardar datos de Bera
-        uses: actions/upload-artifact@v4
-        with:
-          name: bera-frondosas
-          path: bera-frondosas.json
       - name: Calcular hectáreas
         run: |
           python - <<'PY'
@@ -54,11 +43,24 @@ jobs:
               for feature in datos["features"]
           )
 
-          print(f"Superficie total descargada: {total:.2f} hectáreas")
+          print(f"Superficie total: {total:.2f} hectáreas")
           print(f"Número de parcelas: {len(datos['features'])}")
           PY
+
+      - name: Guardar datos de Bera
+        uses: actions/upload-artifact@v4
+        with:
+          name: bera-frondosas
+          path: bera-frondosas.json
+
+      - name: Guardar datos IDENA
+        uses: actions/upload-artifact@v4
+        with:
+          name: idena-capabilities
+          path: idena-capabilities.xml
+
       - name: Mostrar estructura
         run: |
-          echo "Repositorio lurrak-lurrak-permacultura"
-          echo "Flujo de trabajo ejecutado correctamente"
+          echo "Proyecto lurrak-lurrak-permacultura"
+          echo "Flujo ejecutado correctamente"
           find . -maxdepth 2 -type f | sort
