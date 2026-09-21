@@ -10,7 +10,9 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
-
+      - name: Obtener datos IDENA
+        run: |
+          # Aquí irá la consulta a IDENA
       - name: Mostrar estructura
         run: |
           echo "Repositorio lurrak-lurrak-permacultura"
