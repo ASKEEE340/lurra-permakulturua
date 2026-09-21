@@ -41,7 +41,22 @@ jobs:
         with:
           name: bera-frondosas
           path: bera-frondosas.json
+      - name: Calcular hectáreas
+        run: |
+          python - <<'PY'
+          import json
 
+          with open("bera-frondosas.json", encoding="utf-8") as f:
+              datos = json.load(f)
+
+          total = sum(
+              feature["properties"].get("HECTAREAS", 0) or 0
+              for feature in datos["features"]
+          )
+
+          print(f"Superficie total descargada: {total:.2f} hectáreas")
+          print(f"Número de parcelas: {len(datos['features'])}")
+          PY
       - name: Mostrar estructura
         run: |
           echo "Repositorio lurrak-lurrak-permacultura"
