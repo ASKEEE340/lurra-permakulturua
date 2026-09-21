@@ -1,5 +1,26 @@
+name: Ejecutar proyecto
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ejecutar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Obtener datos IDENA
+        run: curl -L "https://idena.navarra.es/ogc/wfs?service=WFS&request=GetCapabilities" -o idena-capabilities.xml
+
       - name: Guardar datos IDENA
         uses: actions/upload-artifact@v4
         with:
           name: idena-capabilities
           path: idena-capabilities.xml
+
+      - name: Mostrar estructura
+        run: |
+          echo "Repositorio lurrak-lurrak-permacultura"
+          echo "Flujo de trabajo ejecutado correctamente"
+          find . -maxdepth 2 -type f | sort
