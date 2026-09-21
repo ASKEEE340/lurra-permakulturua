@@ -13,9 +13,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # =========================================================
+      # 1. DESCARGAR EL REPOSITORIO
+      # =========================================================
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
+
+      # =========================================================
+      # 2. CREAR EXPEDIENTE DIGITAL DE LA FINCA
+      # =========================================================
       - name: Crear expediente digital
         run: |
           mkdir -p expediente/terreno
@@ -31,14 +39,16 @@ jobs:
 
           cat > expediente/finca.json <<'EOF'
           {
-            "nombre": "Finca",
-            "coordenadas": {
-              "latitud": null,
-              "longitud": null
+            "nombre": "Finca Lurra",
+            "ubicacion": {
+              "latitud": 42.8962739,
+              "longitud": -1.5961049,
+              "altitud_referencia_m": 590.1082552
             },
-            "estado": "preparada",
+            "fuente_coordenadas": "Google Earth - parcela delimitada por el usuario",
+            "estado": "en_analisis",
             "agentes": {
-              "terreno": "pendiente",
+              "terreno": "ejecutando",
               "agua": "pendiente",
               "clima": "pendiente",
               "suelo": "pendiente",
@@ -51,29 +61,207 @@ jobs:
           }
           EOF
 
-      - name: Ejecutar Agente Maestro
-        run: |
-          echo "======================================"
-          echo "       AGENTE MAESTRO DE LA FINCA"
-          echo "======================================"
-          echo ""
-          echo "Expediente digital creado."
-          echo ""
-          echo "Agentes preparados:"
-          echo "- Terreno"
-          echo "- Agua"
-          echo "- Clima"
-          echo "- Suelo"
-          echo "- Vegetación"
-          echo "- Satélite"
-          echo "- Parcelas"
-          echo "- Normativa"
-          echo "- Analista"
-          echo ""
-          echo "Siguiente agente: TERRENO"
+          echo "Expediente creado."
 
-      - name: Guardar expediente
+
+      # =========================================================
+      # 3. AGENTE TERRENO
+      # =========================================================
+      - name: Agente Terreno - consultar IGN
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+          import urllib.parse
+          from pathlib import Path
+
+          with open("expediente/finca.json", encoding="utf-8") as f:
+              finca = json.load(f)
+
+          lat = finca["ubicacion"]["latitud"]
+          lon = finca["ubicacion"]["longitud"]
+
+          resultado = {
+              "agente": "terreno",
+              "estado": "iniciado",
+              "coordenadas": {
+                  "latitud": lat,
+                  "longitud": lon
+              },
+              "fuentes": [],
+              "datos": {}
+          }
+
+          # Servicio oficial OGC API Coverages del CNIG/IDEE.
+          # MDT de la Península Ibérica a 5 m.
+          base = (
+              "https://api-coverages.idee.es/collections/"
+              "EL.ElevationGridCoverage_4258_5_PB"
+          )
+
+          resultado["fuentes"].append({
+              "organismo": "IGN/CNIG",
+              "servicio": base,
+              "producto": "Modelo Digital del Terreno (MDT)",
+              "resolucion": "5 m"
+          })
+
+          # Guardamos también la ficha oficial de la colección.
+          try:
+              url = base + "?f=json"
+
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Lurra-Permakultura/1.0"}
+              )
+
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  contenido = response.read().decode("utf-8")
+
+              ficha = json.loads(contenido)
+
+              resultado["datos"]["coleccion_ign"] = {
+                  "titulo": ficha.get("title"),
+                  "descripcion": ficha.get("description"),
+                  "id": ficha.get("id")
+              }
+
+              resultado["estado"] = "datos_ign_obtenidos"
+
+          except Exception as e:
+              resultado["estado"] = "fuente_ign_consultada"
+              resultado["aviso"] = (
+                  "La ficha de la colección IGN no pudo descargarse "
+                  "en esta ejecución."
+              )
+              resultado["error_tecnico"] = str(e)
+
+          Path("expediente/terreno/resultado.json").write_text(
+              json.dumps(resultado, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          print(json.dumps(resultado, ensure_ascii=False, indent=2))
+          PY
+
+
+      # =========================================================
+      # 4. AGENTE TERRENO - INFORME INICIAL
+      # =========================================================
+      - name: Agente Terreno - crear informe
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          with open(
+              "expediente/terreno/resultado.json",
+              encoding="utf-8"
+          ) as f:
+              terreno = json.load(f)
+
+          informe = f"""# Agente Terreno
+
+          ## Punto de referencia
+
+          - Latitud: {terreno["coordenadas"]["latitud"]}
+          - Longitud: {terreno["coordenadas"]["longitud"]}
+
+          ## Fuente principal
+
+          Instituto Geográfico Nacional / CNIG / IDEE
+
+          Modelo Digital del Terreno (MDT) de la Península Ibérica,
+          resolución de 5 metros.
+
+          ## Estado
+
+          {terreno["estado"]}
+
+          ## Objetivo del agente
+
+          El agente Terreno será responsable de reunir:
+
+          - elevación
+          - pendientes
+          - orientación
+          - relieve
+          - zonas altas y bajas
+          - posibles líneas de escorrentía
+          - relación del relieve con agua y diseño de la finca
+
+          Estos datos serán posteriormente cruzados por el Agente Analista.
+          """
+
+          Path(
+              "expediente/terreno/informe.md"
+          ).write_text(informe, encoding="utf-8")
+
+          print("Informe del Agente Terreno creado.")
+          PY
+
+
+      # =========================================================
+      # 5. ACTUALIZAR ESTADO DEL SISTEMA
+      # =========================================================
+      - name: Actualizar estado del expediente
+        run: |
+          python - <<'PY'
+          import json
+
+          archivo = "expediente/finca.json"
+
+          with open(archivo, encoding="utf-8") as f:
+              finca = json.load(f)
+
+          finca["agentes"]["terreno"] = "completado"
+
+          with open(archivo, "w", encoding="utf-8") as f:
+              json.dump(
+                  finca,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("Estado actualizado.")
+          PY
+
+
+      # =========================================================
+      # 6. MOSTRAR RESUMEN
+      # =========================================================
+      - name: Resumen del Agente Maestro
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "       SISTEMA MAESTRO DE LA FINCA"
+          echo "=========================================="
+          echo ""
+          echo "FINCA: Lurra"
+          echo "LATITUD:  42.8962739"
+          echo "LONGITUD: -1.5961049"
+          echo ""
+          echo "AGENTES:"
+          echo "  [OK] Terreno"
+          echo "  [--] Agua"
+          echo "  [--] Clima"
+          echo "  [--] Suelo"
+          echo "  [--] Vegetacion"
+          echo "  [--] Satelite"
+          echo "  [--] Parcelas"
+          echo "  [--] Normativa"
+          echo "  [--] Analista"
+          echo ""
+          echo "Expediente digital preparado."
+          echo "=========================================="
+
+
+      # =========================================================
+      # 7. GUARDAR TODO EL EXPEDIENTE
+      # =========================================================
+      - name: Guardar expediente de la finca
         uses: actions/upload-artifact@v4
         with:
-          name: expediente-finca
+          name: expediente-finca-lurra
           path: expediente/
