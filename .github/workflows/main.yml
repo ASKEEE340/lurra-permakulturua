@@ -10,9 +10,11 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
-      - name: Obtener datos IDENA
+            - name: Obtener datos IDENA
         run: |
-          # Aquí irá la consulta a IDENA
+          curl -L "https://idena.navarra.es/ogc/wfs?service=WFS&request=GetCapabilities" -o idena-capabilities.xml
+          echo "Conexión con IDENA realizada correctamente"
+          ls -lh idena-capabilities.xml
       - name: Mostrar estructura
         run: |
           echo "Repositorio lurrak-lurrak-permacultura"
