@@ -26,7 +26,7 @@ jobs:
             --data-urlencode "request=GetFeature" \
             --data-urlencode "typeNames=IDENA:OCUPAC_Pol_MCA_VE2000" \
             --data-urlencode "outputFormat=application/json" \
-            --data-urlencode "count=20" \
+            --data-urlencode "count=1000" \
             --data-urlencode "CQL_FILTER=MUNICIPIO='Bera' AND GRUPO='Frondosas'" \
             -o bera-frondosas.json
 
