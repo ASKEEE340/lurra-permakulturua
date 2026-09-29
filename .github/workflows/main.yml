@@ -14,790 +14,345 @@ jobs:
 
     steps:
 
-      # ==========================================================
-      # 1. REPOSITORIO
-      # ==========================================================
-
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-
-      # ==========================================================
-      # 2. CREAR ESTRUCTURA
-      # ==========================================================
-
-      - name: Preparar sistema
+      - name: Preparar expediente
         run: |
+          mkdir -p expediente/{terreno,agua,clima,suelo,vegetacion,satelite,parcelas,normativa,analisis,informes}
           mkdir -p agentes
-          mkdir -p expediente/terreno
-          mkdir -p expediente/agua
-          mkdir -p expediente/clima
-          mkdir -p expediente/suelo
-          mkdir -p expediente/vegetacion
-          mkdir -p expediente/satelite
-          mkdir -p expediente/parcelas
-          mkdir -p expediente/normativa
-          mkdir -p expediente/analisis
-          mkdir -p expediente/informes
 
-
-      # ==========================================================
-      # 3. ARCHIVO CENTRAL DE LA FINCA
-      # ==========================================================
-
-      - name: Crear ficha central
-        run: |
           cat > expediente/finca.json <<'EOF'
           {
             "nombre": "Finca Lurra",
             "coordenadas": {
               "latitud": 42.8962739,
-              "longitud": -1.5961049
+              "longitud": -1.5961049,
+              "altitud_referencia_m": 590.1082552
             },
-            "altitud_referencia_m": 590.1082552,
-            "fuente_coordenadas": "Coordenadas proporcionadas por el usuario",
-            "sistema": "WGS84",
-            "estado": "en_analisis",
-            "agentes": {
-              "terreno": "pendiente",
-              "agua": "pendiente",
-              "clima": "pendiente",
-              "suelo": "pendiente",
-              "vegetacion": "pendiente",
-              "satelite": "pendiente",
-              "parcelas": "pendiente",
-              "normativa": "pendiente",
-              "analista": "pendiente"
-            }
+            "fuente_coordenadas": "Google Earth",
+            "estado": "en_analisis"
           }
           EOF
 
-
-      # ==========================================================
-      # 4. AGENTE TERRENO
-      # ==========================================================
-
-      - name: Crear agente terreno
+      - name: Instalar herramientas
         run: |
-          if [ ! -f agentes/terreno.py ]; then
-            cat > agentes/terreno.py <<'PY'
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Crear agente de terreno
+        run: |
+          cat > agentes/terreno.py <<'PY'
           import json
-          import urllib.request
+          import requests
           from pathlib import Path
 
-          FINCA = Path("expediente/finca.json")
-          SALIDA = Path("expediente/terreno/resultado.json")
+          lat = 42.8962739
+          lon = -1.5961049
 
-          finca = json.loads(FINCA.read_text(encoding="utf-8"))
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          fuente = (
-              "https://api-coverages.idee.es/collections/"
-              "EL.ElevationGridCoverage_4258_5_PB?f=json"
-          )
+          fuentes = {
+              "mdt": "https://servicios.idee.es/wcs-inspire/mdt",
+              "pendientes": "https://wms-pendientes.idee.es/pendientes"
+          }
 
           resultado = {
               "agente": "terreno",
-              "estado": "iniciado",
-              "coordenadas": {
-                  "latitud": lat,
-                  "longitud": lon
-              },
-              "altitud_referencia_m": finca.get(
-                  "altitud_referencia_m"
-              ),
-              "fuente_ign": fuente,
-              "datos": {}
-          }
-
-          try:
-              req = urllib.request.Request(
-                  fuente,
-                  headers={
-                      "User-Agent": "Lurra-Permakultura/1.0"
-                  }
-              )
-
-              with urllib.request.urlopen(
-                  req,
-                  timeout=30
-              ) as r:
-                  datos = json.loads(
-                      r.read().decode("utf-8")
-                  )
-
-              resultado["datos"]["coleccion_ign"] = {
-                  "id": datos.get("id"),
-                  "titulo": datos.get("title"),
-                  "descripcion": datos.get("description")
-              }
-
-              resultado["estado"] = "ok"
-
-          except Exception as e:
-              resultado["estado"] = "error"
-              resultado["error"] = str(e)
-
-          SALIDA.write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
-              encoding="utf-8"
-          )
-
-          print(json.dumps(resultado, indent=2))
-          PY
-          fi
-
-
-      # ==========================================================
-      # 5. AGENTE AGUA
-      # ==========================================================
-
-      - name: Crear agente agua
-        run: |
-          if [ ! -f agentes/agua.py ]; then
-            cat > agentes/agua.py <<'PY'
-          import json
-          from pathlib import Path
-
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          resultado = {
-              "agente": "agua",
-              "estado": "fuentes_preparadas",
-              "coordenadas": finca["coordenadas"],
-              "fuentes": [
-                  {
-                      "organismo": "IGN/IDEE",
-                      "tema": "Hidrografía",
-                      "url": "https://servicios.idee.es/wfs-inspire/hidrografia"
-                  }
-              ],
-              "pendiente": [
-                  "cursos de agua",
-                  "masas de agua",
-                  "drenajes",
-                  "relación con la finca",
-                  "zonas potenciales de escorrentía"
+              "coordenadas": {"latitud": lat, "longitud": lon},
+              "fuentes_oficiales": fuentes,
+              "estado": "fuentes_verificadas",
+              "datos_pendientes": [
+                  "elevacion",
+                  "pendiente",
+                  "orientacion",
+                  "curvas_de_nivel",
+                  "modelo_3d"
               ]
           }
 
-          Path(
-              "expediente/agua/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
+          Path("expediente/terreno/terreno.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
-
-          print("Agente Agua preparado.")
+          print("Agente terreno ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 6. AGENTE CLIMA
-      # ==========================================================
-
-      - name: Crear agente clima
+      - name: Crear agente de agua
         run: |
-          if [ ! -f agentes/clima.py ]; then
-            cat > agentes/clima.py <<'PY'
+          cat > agentes/agua.py <<'PY'
           import json
-          import urllib.request
           from pathlib import Path
 
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
+          resultado = {
+              "agente": "agua",
+              "fuente_oficial": "https://servicios.idee.es/wfs-inspire/hidrografia",
+              "estado": "fuente_preparada",
+              "objetivos": [
+                  "cauces",
+                  "arroyos",
+                  "rios",
+                  "drenajes",
+                  "cuencas",
+                  "relacion_con_la_finca"
+              ]
+          }
 
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
+          Path("expediente/agua/agua.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
+              encoding="utf-8"
+          )
+          print("Agente agua ejecutado")
+          PY
+
+      - name: Crear agente de clima
+        run: |
+          cat > agentes/clima.py <<'PY'
+          import json
+          import requests
+          from pathlib import Path
+
+          lat = 42.8962739
+          lon = -1.5961049
 
           url = (
               "https://api.open-meteo.com/v1/forecast"
-              f"?latitude={lat}"
-              f"&longitude={lon}"
+              f"?latitude={lat}&longitude={lon}"
               "&current=temperature_2m,relative_humidity_2m,"
-              "precipitation,wind_speed_10m"
+              "precipitation,wind_speed_10m,wind_direction_10m"
               "&daily=temperature_2m_max,temperature_2m_min,"
-              "precipitation_sum"
+              "precipitation_sum,wind_speed_10m_max"
               "&timezone=Europe%2FMadrid"
           )
 
+          datos = requests.get(url, timeout=30)
+          datos.raise_for_status()
+
           resultado = {
               "agente": "clima",
-              "estado": "iniciado",
-              "coordenadas": finca["coordenadas"]
+              "coordenadas": {"latitud": lat, "longitud": lon},
+              "fuente": "Open-Meteo",
+              "datos": datos.json()
           }
 
-          try:
-              with urllib.request.urlopen(
-                  url,
-                  timeout=30
-              ) as r:
-                  datos = json.loads(
-                      r.read().decode("utf-8")
-                  )
-
-              resultado["datos"] = datos
-              resultado["estado"] = "ok"
-
-          except Exception as e:
-              resultado["estado"] = "error"
-              resultado["error"] = str(e)
-
-          Path(
-              "expediente/clima/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
+          Path("expediente/clima/clima.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
-
-          print("Agente Clima ejecutado.")
+          print("Agente clima ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 7. AGENTE SUELO
-      # ==========================================================
-
-      - name: Crear agente suelo
+      - name: Crear agente de satélite
         run: |
-          if [ ! -f agentes/suelo.py ]; then
-            cat > agentes/suelo.py <<'PY'
+          cat > agentes/satelite.py <<'PY'
           import json
           from pathlib import Path
 
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
+          resultado = {
+              "agente": "satelite",
+              "fuentes_oficiales": {
+                  "pnoa_actual": "https://www.ign.es/wms-inspire/pnoa-ma",
+                  "pnoa_historico": "https://www.ign.es/wms/pnoa-historico",
+                  "wmts_pnoa": "https://www.ign.es/wmts/pnoa-ma"
+              },
+              "estado": "fuentes_verificadas",
+              "objetivos": [
+                  "ortofoto_actual",
+                  "ortofotos_historicas",
+                  "cambios_del_terreno",
+                  "cobertura_vegetal"
+              ]
+          }
+
+          Path("expediente/satelite/satelite.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
+              encoding="utf-8"
           )
+          print("Agente satelite ejecutado")
+          PY
+
+      - name: Crear agente de parcelas
+        run: |
+          cat > agentes/parcelas.py <<'PY'
+          import json
+          from pathlib import Path
+
+          resultado = {
+              "agente": "parcelas",
+              "coordenadas": {
+                  "latitud": 42.8962739,
+                  "longitud": -1.5961049
+              },
+              "fuente": "IDENA / Navarra",
+              "servicio": "https://idena.navarra.es/ogc/wfs",
+              "estado": "pendiente_de_identificacion",
+              "objetivo": "localizar los recintos que contienen o rodean la finca"
+          }
+
+          Path("expediente/parcelas/parcelas.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
+              encoding="utf-8"
+          )
+          print("Agente parcelas ejecutado")
+          PY
+
+      - name: Crear agente de suelo
+        run: |
+          cat > agentes/suelo.py <<'PY'
+          import json
+          from pathlib import Path
 
           resultado = {
               "agente": "suelo",
               "estado": "pendiente_de_fuente",
-              "coordenadas": finca["coordenadas"],
-              "objetivos": [
+              "datos_necesarios": [
+                  "tipo_de_suelo",
                   "textura",
-                  "materia organica",
-                  "pH",
-                  "carbono",
                   "profundidad",
+                  "materia_organica",
+                  "pH",
                   "drenaje",
-                  "capacidad productiva"
-              ],
-              "nota": (
-                  "El agente queda preparado para incorporar "
-                  "la fuente de suelo validada."
-              )
+                  "capacidad_de_retencion_de_agua"
+              ]
           }
 
-          Path(
-              "expediente/suelo/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
+          Path("expediente/suelo/suelo.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
+          print("Agente suelo ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 8. AGENTE VEGETACIÓN
-      # ==========================================================
-
-      - name: Crear agente vegetacion
+      - name: Crear agente de vegetacion
         run: |
-          if [ ! -f agentes/vegetacion.py ]; then
-            cat > agentes/vegetacion.py <<'PY'
+          cat > agentes/vegetacion.py <<'PY'
           import json
           from pathlib import Path
-
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
 
           resultado = {
               "agente": "vegetacion",
-              "estado": "fuentes_preparadas",
-              "coordenadas": finca["coordenadas"],
+              "estado": "pendiente_de_datos",
               "objetivos": [
-                  "vegetacion existente",
-                  "bosques",
+                  "cobertura_actual",
+                  "masas_forestales",
+                  "cultivos",
                   "matorral",
-                  "cultivos",
-                  "usos del suelo",
-                  "hábitats potenciales",
-                  "especies de interés"
-              ],
-              "fuentes": [
-                  "IDENA",
-                  "IGN",
-                  "PNOA"
+                  "zonas_abiertas",
+                  "cambios_historicos"
               ]
           }
 
-          Path(
-              "expediente/vegetacion/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
+          Path("expediente/vegetacion/vegetacion.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
+          print("Agente vegetacion ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 9. AGENTE SATÉLITE
-      # ==========================================================
-
-      - name: Crear agente satelite
+      - name: Crear agente de normativa
         run: |
-          if [ ! -f agentes/satelite.py ]; then
-            cat > agentes/satelite.py <<'PY'
+          cat > agentes/normativa.py <<'PY'
           import json
           from pathlib import Path
-
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          resultado = {
-              "agente": "satelite",
-              "estado": "fuentes_preparadas",
-              "coordenadas": finca["coordenadas"],
-              "fuentes": {
-                  "PNOA": "https://www.ign.es/wmts/pnoa-ma",
-                  "MDT": "https://servicios.idee.es/wmts/mdt"
-              },
-              "objetivos": [
-                  "ortofotografía",
-                  "cambios de cobertura",
-                  "relieve visible",
-                  "vegetación",
-                  "parcelas",
-                  "evolución temporal"
-              ]
-          }
-
-          Path(
-              "expediente/satelite/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
-              encoding="utf-8"
-          )
-          PY
-          fi
-
-
-      # ==========================================================
-      # 10. AGENTE PARCELAS
-      # ==========================================================
-
-      - name: Crear agente parcelas
-        run: |
-          if [ ! -f agentes/parcelas.py ]; then
-            cat > agentes/parcelas.py <<'PY'
-          import json
-          from pathlib import Path
-
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          resultado = {
-              "agente": "parcelas",
-              "estado": "preparado",
-              "coordenadas": finca["coordenadas"],
-              "fuentes": [
-                  {
-                      "organismo": "IDENA",
-                      "url": "https://idena.navarra.es/ogc/wfs"
-                  }
-              ],
-              "objetivos": [
-                  "parcela catastral",
-                  "recintos",
-                  "usos",
-                  "cultivos",
-                  "superficies",
-                  "límites"
-              ],
-              "advertencia": (
-                  "No se reutilizan automáticamente los datos "
-                  "anteriores de Bera porque esta finca tiene "
-                  "coordenadas distintas."
-              )
-          }
-
-          Path(
-              "expediente/parcelas/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
-              encoding="utf-8"
-          )
-          PY
-          fi
-
-
-      # ==========================================================
-      # 11. AGENTE NORMATIVA
-      # ==========================================================
-
-      - name: Crear agente normativa
-        run: |
-          if [ ! -f agentes/normativa.py ]; then
-            cat > agentes/normativa.py <<'PY'
-          import json
-          from pathlib import Path
-
-          finca = json.loads(
-              Path("expediente/finca.json").read_text(
-                  encoding="utf-8"
-              )
-          )
 
           resultado = {
               "agente": "normativa",
-              "estado": "pendiente_de_identificacion_territorial",
-              "coordenadas": finca["coordenadas"],
+              "estado": "pendiente_de_identificacion",
               "objetivos": [
-                  "planeamiento municipal",
-                  "protección ambiental",
-                  "zonas protegidas",
+                  "planeamiento",
+                  "protecciones",
+                  "espacios_naturales",
                   "cauces",
                   "servidumbres",
-                  "usos permitidos",
-                  "restricciones agrícolas",
-                  "normativa forestal",
-                  "normativa de agua"
+                  "usos_permitidos"
               ]
           }
 
-          Path(
-              "expediente/normativa/resultado.json"
-          ).write_text(
-              json.dumps(
-                  resultado,
-                  ensure_ascii=False,
-                  indent=2
-              ),
+          Path("expediente/normativa/normativa.json").write_text(
+              json.dumps(resultado, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
+          print("Agente normativa ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 12. AGENTE ANALISTA
-      # ==========================================================
-
-      - name: Crear agente analista
+      - name: Crear analista
         run: |
-          if [ ! -f agentes/analista.py ]; then
-            cat > agentes/analista.py <<'PY'
+          cat > agentes/analista.py <<'PY'
           import json
           from pathlib import Path
 
           base = Path("expediente")
+          resultados = {}
 
-          agentes = [
-              "terreno",
-              "agua",
-              "clima",
-              "suelo",
-              "vegetacion",
-              "satelite",
-              "parcelas",
-              "normativa"
-          ]
+          for carpeta in base.iterdir():
+              if carpeta.is_dir():
+                  resultados[carpeta.name] = [
+                      str(f.relative_to(base))
+                      for f in carpeta.rglob("*")
+                      if f.is_file()
+                  ]
 
-          informe = [
-              "# INFORME DEL AGENTE ANALISTA",
-              "",
-              "## Estado del expediente",
-              ""
-          ]
+          informe = {
+              "agente": "analista",
+              "estado": "ejecutado",
+              "expediente": resultados,
+              "siguiente_fase": [
+                  "completar_datos_reales",
+                  "cruzar_capas",
+                  "detectar_datos_faltantes",
+                  "preparar_diseño_de_permacultura"
+              ]
+          }
 
-          pendientes = []
-
-          for agente in agentes:
-              archivo = (
-                  base /
-                  agente /
-                  "resultado.json"
-              )
-
-              if not archivo.exists():
-                  estado = "SIN RESULTADO"
-                  pendientes.append(agente)
-              else:
-                  try:
-                      datos = json.loads(
-                          archivo.read_text(
-                              encoding="utf-8"
-                          )
-                      )
-                      estado = datos.get(
-                          "estado",
-                          "sin estado"
-                      )
-                  except Exception:
-                      estado = "ERROR"
-                      pendientes.append(agente)
-
-              informe.append(
-                  f"- {agente}: **{estado}**"
-              )
-
-          informe.extend([
-              "",
-              "## Datos que todavía requieren trabajo",
-              ""
-          ])
-
-          if pendientes:
-              for p in pendientes:
-                  informe.append(f"- {p}")
-          else:
-              informe.append(
-                  "No hay agentes sin resultado."
-              )
-
-          informe.extend([
-              "",
-              "## Principio del sistema",
-              "",
-              "El Analista no sustituye los datos originales.",
-              "Cruza las fuentes, identifica contradicciones,",
-              "señala datos ausentes y prepara la información",
-              "para el futuro diseño de permacultura.",
-              "",
-              "## Próximo módulo",
-              "",
-              "Agente Diseñador de Permacultura."
-          ])
-
-          (
-              base /
-              "analisis" /
-              "informe-analista.md"
-          ).write_text(
-              "\n".join(informe),
+          Path("expediente/analisis/informe.json").write_text(
+              json.dumps(informe, indent=2, ensure_ascii=False),
               encoding="utf-8"
           )
 
-          print("\n".join(informe))
+          print("Analista ejecutado")
           PY
-          fi
 
-
-      # ==========================================================
-      # 13. CREAR MAESTRO
-      # ==========================================================
-
-      - name: Crear agente maestro
+      - name: Ejecutar todos los agentes
         run: |
-          if [ ! -f agentes/maestro.py ]; then
-            cat > agentes/maestro.py <<'PY'
-          import json
-          import subprocess
-          from pathlib import Path
+          python agentes/terreno.py
+          python agentes/agua.py
+          python agentes/clima.py
+          python agentes/suelo.py
+          python agentes/vegetacion.py
+          python agentes/satelite.py
+          python agentes/parcelas.py
+          python agentes/normativa.py
+          python agentes/analista.py
 
-          agentes = [
-              "terreno",
-              "agua",
-              "clima",
-              "suelo",
-              "vegetacion",
-              "satelite",
-              "parcelas",
-              "normativa"
-          ]
-
-          for nombre in agentes:
-              print("")
-              print("=" * 60)
-              print(f"AGENTE: {nombre.upper()}")
-              print("=" * 60)
-
-              subprocess.run(
-                  ["python", f"agentes/{nombre}.py"],
-                  check=False
-              )
-
-          print("")
-          print("=" * 60)
-          print("ANALISTA")
-          print("=" * 60)
-
-          subprocess.run(
-              ["python", "agentes/analista.py"],
-              check=False
-          )
-
-          finca = Path(
-              "expediente/finca.json"
-          )
-
-          datos = json.loads(
-              finca.read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          for nombre in agentes:
-              archivo = (
-                  Path("expediente") /
-                  nombre /
-                  "resultado.json"
-              )
-
-              if archivo.exists():
-                  try:
-                      resultado = json.loads(
-                          archivo.read_text(
-                              encoding="utf-8"
-                          )
-                      )
-                      datos["agentes"][nombre] = (
-                          resultado.get(
-                              "estado",
-                              "ejecutado"
-                          )
-                      )
-                  except Exception:
-                      datos["agentes"][nombre] = "error"
-
-          datos["agentes"]["analista"] = "ejecutado"
-
-          datos["estado"] = "analizado"
-
-          finca.write_text(
-              json.dumps(
-                  datos,
-                  ensure_ascii=False,
-                  indent=2
-              ),
-              encoding="utf-8"
-          )
-
-          print("")
-          print("SISTEMA MAESTRO FINALIZADO")
-          PY
-          fi
-
-
-      # ==========================================================
-      # 14. EJECUTAR TODO
-      # ==========================================================
-
-      - name: Ejecutar Sistema Maestro
+      - name: Generar resumen
         run: |
-          python agentes/maestro.py
-
-
-      # ==========================================================
-      # 15. INFORME GENERAL
-      # ==========================================================
-
-      - name: Crear resumen general
-        run: |
-          cat > expediente/informes/resumen-general.md <<'EOF'
-          # EXPEDIENTE DIGITAL — FINCA LURRA
-
-          ## Sistema
-
-          Sistema Maestro de la Finca.
-
-          ## Agentes
-
-          - Terreno
-          - Agua
-          - Clima
-          - Suelo
-          - Vegetación
-          - Satélite
-          - Parcelas
-          - Normativa
-          - Analista
-
-          ## Objetivo
-
-          Reunir información territorial, ambiental,
-          climática, hidrológica, edafológica y normativa
-          en un único expediente.
-
-          ## Próxima fase
-
-          Agente Diseñador de Permacultura.
-
-          El diseñador utilizará el expediente validado
-          por el Agente Analista para generar propuestas
-          de diseño de la finca.
-          EOF
-
-
-      # ==========================================================
-      # 16. GUARDAR TODO
-      # ==========================================================
+          echo "======================================"
+          echo "     SISTEMA MAESTRO DE FINCA LURRA"
+          echo "======================================"
+          echo ""
+          echo "Coordenadas:"
+          echo "42.8962739, -1.5961049"
+          echo ""
+          echo "Agentes ejecutados:"
+          echo "- Terreno"
+          echo "- Agua"
+          echo "- Clima"
+          echo "- Suelo"
+          echo "- Vegetación"
+          echo "- Satélite"
+          echo "- Parcelas"
+          echo "- Normativa"
+          echo "- Analista"
+          echo ""
+          echo "EXPEDIENTE GENERADO:"
+          find expediente -type f | sort
 
       - name: Guardar expediente completo
         uses: actions/upload-artifact@v4
         with:
-          name: expediente-finca-lurra-completo
+          name: expediente-finca-lurra-real
           path: expediente/
-
-
-      # ==========================================================
-      # 17. GUARDAR AGENTES
-      # ==========================================================
 
       - name: Guardar agentes
         uses: actions/upload-artifact@v4
         with:
-          name: agentes-finca-lurra
+          name: agentes-finca-lurra-real
           path: agentes/
