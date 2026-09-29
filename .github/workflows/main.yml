@@ -3,7 +3,7 @@ name: Sistema Maestro de la Finca
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * 1"
+    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
@@ -11,1316 +11,385 @@ permissions:
   id-token: write
 
 jobs:
-  sistema-maestro:
+  finca:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ============================================================
-      # 1. PREPARACIÓN
-      # ============================================================
-
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Preparar expediente
-        run: |
-          rm -rf expediente public
-          mkdir -p expediente/{terreno,agua,clima,suelo,vegetacion,satelite,parcelas,normativa,analisis,informes}
-          mkdir -p agentes
-          mkdir -p public
-
-      - name: Instalar dependencias
+      - name: Preparar entorno
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyproj
+          pip install requests shapely pyproj numpy rasterio astral
 
-      # ============================================================
-      # 2. CONFIGURACIÓN CENTRAL
-      # ============================================================
-
-      - name: Crear configuración de la finca
+      - name: Crear motor de agentes
         run: |
-          cat > expediente/finca.json <<'EOF'
-          {
-            "nombre": "Lurra - Finca de permacultura",
-            "coordenadas": {
-              "latitud": 42.8962739,
-              "longitud": -1.5961049
-            },
-            "altitud_referencia_m": 590.1082552,
-            "sistema_coordenadas": "EPSG:4326",
-            "utm": "EPSG:25830",
-            "radio_busqueda_m": 1000,
-            "objetivo": "Regeneración del terreno, vida en la finca y diseño de permacultura"
-          }
-          EOF
-
-      # ============================================================
-      # 3. AGENTE TERRENO
-      # ============================================================
-
-      - name: Crear agente terreno
-        run: |
-          cat > agentes/terreno.py <<'PY'
-          import json
-          import requests
+          mkdir -p agentes
+          cat > agentes/sistema_finca.py <<'PY'
+          import json, math, re, sys, traceback
           from pathlib import Path
+          from datetime import datetime, timedelta, timezone
+          import xml.etree.ElementTree as ET
+          import requests
+          import numpy as np
+          from shapely.geometry import shape, mapping, Polygon, box
+          from shapely.ops import transform
+          from pyproj import Transformer
 
-          OUT = Path("expediente/terreno")
-          OUT.mkdir(parents=True, exist_ok=True)
+          ROOT = Path('.')
+          EXP = ROOT / 'expediente'
+          for d in ['finca','terreno','agua','clima','suelo','vegetacion','satelite','parcelas','normativa','analisis','informes']:
+              (EXP / d).mkdir(parents=True, exist_ok=True)
 
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
+          LAT = 42.8962739
+          LON = -1.5961049
+          ALT_REF = 590.1082552
+          IDENA = 'https://idena.navarra.es/ogc/wfs'
+          CAT = 'https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCoordenadas.asmx/Consulta_RCCOOR'
+          UTM = Transformer.from_crs(4326, 25830, always_xy=True)
+          WGS = Transformer.from_crs(25830, 4326, always_xy=True)
 
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
+          def save(path, data):
+              p = EXP / path
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
-          resultado = {
-              "agente": "terreno",
-              "estado": "OK",
-              "punto": {
-                  "latitud": lat,
-                  "longitud": lon
-              },
-              "altitud_referencia_usuario_m": finca["altitud_referencia_m"],
-              "fuentes": {},
-              "observaciones": []
-          }
+          def fail(agent, exc):
+              save(f'{agent}/resultado.json', {
+                  'agente': agent,
+                  'estado': 'ERROR',
+                  'error': str(exc),
+                  'fecha_utc': datetime.now(timezone.utc).isoformat()
+              })
+              print(f'[ERROR] {agent}: {exc}')
+              traceback.print_exc()
 
-          # OGC API Coverages del IGN.
-          # Se solicita únicamente una pequeña ventana alrededor del punto.
-          fuentes = {
-              "mdt_5m": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_5_PB",
-              "mdt_25m": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_25_PB"
-          }
+          def kml_polygon():
+              candidates = list((ROOT / 'datos').glob('*.kml')) if (ROOT / 'datos').exists() else []
+              candidates += list(ROOT.glob('*.kml'))
+              candidates += list(ROOT.glob('**/*.kml'))
+              seen=[]; unique=[]
+              for p in candidates:
+                  if p not in seen:
+                      seen.append(p); unique.append(p)
+              if not unique:
+                  raise FileNotFoundError('No se encontró ningún KML. Debe existir un .kml en datos/ o en la raíz del repositorio.')
+              path = unique[0]
+              root = ET.fromstring(path.read_text(encoding='utf-8'))
+              ns={'k':'http://www.opengis.net/kml/2.2'}
+              polys=[]
+              for pm in root.findall('.//k:Placemark', ns):
+                  c = pm.find('.//k:Polygon//k:outerBoundaryIs//k:LinearRing//k:coordinates', ns)
+                  if c is None or not c.text: continue
+                  pts=[]
+                  for item in re.split(r'\s+', c.text.strip()):
+                      vals=item.split(',')
+                      if len(vals)>=2:
+                          pts.append((float(vals[0]), float(vals[1])))
+                  if len(pts)>=4:
+                      poly=Polygon(pts)
+                      if poly.is_valid and poly.area>0: polys.append((poly, pm.findtext('k:name', default='', namespaces=ns)))
+              if not polys: raise ValueError(f'No hay un polígono válido en {path}')
+              poly,name=max(polys, key=lambda t:t[0].area)
+              if not poly.equals_exact(Polygon(list(poly.exterior.coords)), 1e-12):
+                  poly=poly.buffer(0)
+              return path, poly, name or '2026 LURRA'
 
-          delta = 0.0005
+          def geometry_agent():
+              path, poly, name = kml_polygon()
+              poly_utm = transform(UTM.transform, poly)
+              centroid_utm=poly_utm.centroid
+              centroid_wgs=transform(WGS.transform, centroid_utm)
+              minx,miny,maxx,maxy=poly_utm.bounds
+              result={
+                  'agente':'finca', 'estado':'OK',
+                  'fuente_kml':str(path), 'nombre':name,
+                  'vertices':len(list(poly.exterior.coords))-1,
+                  'superficie_m2':poly_utm.area,
+                  'superficie_ha':poly_utm.area/10000.0,
+                  'perimetro_m':poly_utm.length,
+                  'bbox_utm25830':[minx,miny,maxx,maxy],
+                  'centroide':[centroid_wgs.x,centroid_wgs.y],
+                  'punto_referencia':[LAT,LON],
+                  'altitud_referencia_m':ALT_REF,
+                  'crs':'EPSG:4326 / EPSG:25830',
+                  'fecha_utc':datetime.now(timezone.utc).isoformat()
+              }
+              save('finca/resultado.json',result)
+              save('finca/finca.geojson',{
+                  'type':'FeatureCollection','features':[{
+                      'type':'Feature','properties':{'nombre':name,'area_m2':poly_utm.area,'area_ha':poly_utm.area/10000.0},
+                      'geometry':mapping(poly)
+                  }], 'crs':{'type':'name','properties':{'name':'EPSG:4326'}}
+              })
+              return poly, poly_utm, result
 
-          bbox = f"{lon-delta},{lat-delta},{lon+delta},{lat+delta}"
+          def wfs_query(layer, bbox, max_features=5000):
+              params={
+                  'service':'WFS','version':'2.0.0','request':'GetFeature',
+                  'typeNames':f'IDENA:{layer}','outputFormat':'application/json',
+                  'srsName':'EPSG:25830','count':str(max_features),
+                  'bbox':','.join(f'{v:.3f}' for v in bbox)+',EPSG:25830'
+              }
+              r=requests.get(IDENA, params=params, timeout=60)
+              r.raise_for_status()
+              return r.json(), r.url
 
-          for nombre, url in fuentes.items():
+          def clip_features(data, poly_utm):
+              out=[]
+              for feat in data.get('features',[]):
+                  geom=feat.get('geometry')
+                  if not geom: continue
+                  try: g=shape(geom)
+                  except Exception: continue
+                  if not g.is_valid: g=g.buffer(0)
+                  if not g.intersects(poly_utm): continue
+                  inter=g.intersection(poly_utm)
+                  p=dict(feat.get('properties') or {})
+                  p['_intersect_area_m2']=inter.area if hasattr(inter,'area') else 0
+                  p['_source_area_m2']=g.area if hasattr(g,'area') else None
+                  p['_inside_pct']= (100*p['_intersect_area_m2']/p['_source_area_m2']) if p.get('_source_area_m2') else None
+                  inter_wgs=transform(WGS.transform, inter)
+                  out.append({'type':'Feature','properties':p,'geometry':mapping(inter_wgs)})
+              return {'type':'FeatureCollection','features':out,'crs':{'type':'name','properties':{'name':'EPSG:4326'}}}
 
+          def vector_agent(agent, layers, poly_utm):
               try:
-                  r = requests.get(
-                      url,
-                      params={
-                          "f": "json"
-                      },
-                      timeout=60
-                  )
-
-                  r.raise_for_status()
-
-                  metadata = r.json()
-
-                  resultado["fuentes"][nombre] = {
-                      "accesible": True,
-                      "titulo": metadata.get("title"),
-                      "id": metadata.get("id"),
-                      "bbox_consultado": bbox
-                  }
-
-              except Exception as e:
-
-                  resultado["fuentes"][nombre] = {
-                      "accesible": False,
-                      "error": str(e)
-                  }
-
-          # Intento de consulta puntual de cobertura.
-          # El servidor puede limitar la resolución o parámetros.
-          for nombre, url in fuentes.items():
-
-              try:
-
-                  r = requests.get(
-                      url + "/coverage",
-                      params={
-                          "f": "json",
-                          "bbox": bbox,
-                          "subset": [
-                              f"Lat({lat-0.0001},{lat+0.0001})",
-                              f"Long({lon-0.0001},{lon+0.0001})"
-                          ]
-                      },
-                      timeout=60
-                  )
-
-                  if r.ok:
-
+                  bbox=poly_utm.bounds
+                  results=[]; errors=[]
+                  for layer in layers:
                       try:
-                          datos = r.json()
+                          data,url=wfs_query(layer,bbox)
+                          clipped=clip_features(data,poly_utm)
+                          out=EXP/agent/f'{layer}.geojson'
+                          out.write_text(json.dumps(clipped,ensure_ascii=False,indent=2),encoding='utf-8')
+                          results.append({'layer':layer,'estado':'OK','encontrados':len(data.get('features',[])),'dentro_finca':len(clipped['features']),'url':url})
+                      except Exception as e:
+                          errors.append({'layer':layer,'error':str(e)})
+                          results.append({'layer':layer,'estado':'ERROR','error':str(e)})
+                  status='OK' if any(x['estado']=='OK' and x.get('dentro_finca',0)>=0 for x in results) else 'ERROR'
+                  save(f'{agent}/resultado.json',{'agente':agent,'estado':status,'capas':results,'errores':errors,'fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail(agent,e)
 
-                          with open(
-                              OUT / f"{nombre}_punto.json",
-                              "w",
-                              encoding="utf-8"
-                          ) as f:
-                              json.dump(
-                                  datos,
-                                  f,
-                                  ensure_ascii=False,
-                                  indent=2
-                              )
-
-                          resultado["observaciones"].append(
-                              f"Se obtuvo respuesta de cobertura para {nombre}"
-                          )
-
-                      except Exception:
-                          resultado["observaciones"].append(
-                              f"{nombre}: respuesta no JSON"
-                          )
-
-                  else:
-                      resultado["observaciones"].append(
-                          f"{nombre}: cobertura no disponible mediante esta consulta"
-                      )
-
-              except Exception as e:
-
-                  resultado["observaciones"].append(
-                      f"{nombre}: {str(e)}"
-                  )
-
-          with open(
-              OUT / "terreno.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print(json.dumps(resultado, ensure_ascii=False, indent=2))
-          PY
-
-      # ============================================================
-      # 4. AGENTE PARCELAS
-      # ============================================================
-
-      - name: Crear agente parcelas
-        run: |
-          cat > agentes/parcelas.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-
-          OUT = Path("expediente/parcelas")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          # Conversión aproximada a UTM 30N.
-          from pyproj import Transformer
-
-          transformer = Transformer.from_crs(
-              "EPSG:4326",
-              "EPSG:25830",
-              always_xy=True
-          )
-
-          x, y = transformer.transform(lon, lat)
-
-          radio = finca["radio_busqueda_m"]
-
-          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
-
-          url = "https://inspire.navarra.es/services/CP/wfs"
-
-          params = {
-              "service": "WFS",
-              "version": "2.0.0",
-              "request": "GetFeature",
-              "typenames": "CP:CadastralParcel",
-              "outputFormat": "application/json",
-              "srsName": "EPSG:25830",
-              "bbox": bbox,
-              "count": 500
-          }
-
-          resultado = {
-              "agente": "parcelas",
-              "estado": "PENDIENTE",
-              "punto_wgs84": {
-                  "latitud": lat,
-                  "longitud": lon
-              },
-              "punto_utm": {
-                  "x": x,
-                  "y": y
-              },
-              "bbox_utm": bbox,
-              "numero_elementos": 0
-          }
-
-          try:
-
-              r = requests.get(
-                  url,
-                  params=params,
-                  timeout=120
-              )
-
-              r.raise_for_status()
-
-              data = r.json()
-
-              features = data.get("features", [])
-
-              resultado["numero_elementos"] = len(features)
-
-              if features:
-                  resultado["estado"] = "OK"
-
-              with open(
-                  OUT / "parcelas.geojson",
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-                  json.dump(
-                      data,
-                      f,
-                      ensure_ascii=False,
-                      indent=2
-                  )
-
-              # Buscar la parcela que contiene el punto
-              # mediante consulta espacial posterior si es posible.
-              resultado["datos"] = features
-
-          except Exception as e:
-
-              resultado["estado"] = "ERROR"
-              resultado["error"] = str(e)
-
-          with open(
-              OUT / "parcelas.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print(
-              "Parcelas encontradas:",
-              resultado["numero_elementos"]
-          )
-          PY
-
-      # ============================================================
-      # 5. AGENTE AGUA
-      # ============================================================
-
-      - name: Crear agente agua
-        run: |
-          cat > agentes/agua.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-          from pyproj import Transformer
-
-          OUT = Path("expediente/agua")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          transformer = Transformer.from_crs(
-              "EPSG:4326",
-              "EPSG:25830",
-              always_xy=True
-          )
-
-          x, y = transformer.transform(lon, lat)
-
-          radio = finca["radio_busqueda_m"]
-
-          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "hidrografia_lineal": "CARBTU_Lin_Hidrografia_201",
-              "hidrografia_poligonal": "CARBTU_Pol_Hidrografia_201"
-          }
-
-          resultado = {
-              "agente": "agua",
-              "estado": "OK",
-              "bbox_utm": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typenames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:25830",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
+          def terrain_agent(poly_utm):
               try:
-
-                  r = requests.get(
-                      url,
-                      params=params,
-                      timeout=120
-                  )
-
+                  minx,miny,maxx,maxy=poly_utm.bounds
+                  pad=10
+                  bbox=[minx-pad,miny-pad,maxx+pad,maxy+pad]
+                  stats={'bbox_utm25830':bbox,'resolucion_m':5}
+                  url='https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_25830_5_PB/coverage'
+                  r=requests.get(url,params={'bbox':','.join(f'{x:.3f}' for x in bbox),'bbox-crs':'25830','f':'COG'},timeout=120)
                   r.raise_for_status()
+                  tif=EXP/'terreno/mdt5_finca.tif'
+                  tif.write_bytes(r.content)
+                  import rasterio
+                  from rasterio.mask import mask
+                  from rasterio.transform import xy
+                  with rasterio.open(tif) as src:
+                      arr, out_transform=mask(src,[mapping(poly_utm)],crop=True,filled=False)
+                      data=arr[0].astype('float64')
+                      vals=data.compressed()
+                      if vals.size==0: raise ValueError('El MDT no devuelve celdas dentro del polígono.')
+                      stats.update({'celdas_validas':int(vals.size),'elevacion_min_m':float(np.min(vals)),'elevacion_max_m':float(np.max(vals)),'elevacion_media_m':float(np.mean(vals)),'elevacion_mediana_m':float(np.median(vals))})
+                      # Pendiente y orientación aproximadas a partir de la malla de 5 m
+                      filled=data.copy()
+                      nodata_mask=np.ma.getmaskarray(arr[0])
+                      filled[nodata_mask]=float(np.nanmedian(vals))
+                      px=abs(src.transform.a); py=abs(src.transform.e)
+                      dzdy,dzdx=np.gradient(filled,py,px)
+                      slope=np.degrees(np.arctan(np.sqrt(dzdx**2+dzdy**2)))
+                      aspect=(np.degrees(np.arctan2(-dzdx,dzdy))+360)%360
+                      sm=slope[~nodata_mask]; am=aspect[~nodata_mask]
+                      stats.update({'pendiente_media_grados':float(np.mean(sm)),'pendiente_max_grados':float(np.max(sm)),'orientacion_media_grados':float((math.degrees(math.atan2(np.mean(np.sin(np.radians(am))),np.mean(np.cos(np.radians(am)))))+360)%360)})
+                  save('terreno/resultado.json',{'agente':'terreno','estado':'OK','fuente':url,'estadisticas':stats,'fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail('terreno',e)
 
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "OK",
-                      "numero_elementos": len(
-                          data.get("features", [])
-                      )
-                  }
-
-                  with open(
-                      OUT / f"{nombre}.geojson",
-                      "w",
-                      encoding="utf-8"
-                  ) as f:
-                      json.dump(
-                          data,
-                          f,
-                          ensure_ascii=False,
-                          indent=2
-                      )
-
-              except Exception as e:
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "ERROR",
-                      "error": str(e)
-                  }
-
-          with open(
-              OUT / "agua.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente agua terminado.")
-          PY
-
-      # ============================================================
-      # 6. AGENTE SUELO
-      # ============================================================
-
-      - name: Crear agente suelo
-        run: |
-          cat > agentes/suelo.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-          from pyproj import Transformer
-
-          OUT = Path("expediente/suelo")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          transformer = Transformer.from_crs(
-              "EPSG:4326",
-              "EPSG:25830",
-              always_xy=True
-          )
-
-          x, y = transformer.transform(lon, lat)
-
-          radio = finca["radio_busqueda_m"]
-
-          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "mapa_suelos": "EDAFOL_Pol_Suelos25m",
-              "clases_agrologicas": "AGRICU_Pol_CLAgrol25m",
-              "subclases_agrologicas": "AGRICU_Pol_SCAgrol25m",
-              "aptitud_riego": "REGADI_Pol_CLApti25m"
-          }
-
-          resultado = {
-              "agente": "suelo",
-              "estado": "OK",
-              "bbox_utm": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typenames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:25830",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
+          def climate_agent(poly_utm, poly):
               try:
-
-                  r = requests.get(
-                      url,
-                      params=params,
-                      timeout=120
-                  )
-
-                  r.raise_for_status()
-
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "OK",
-                      "numero_elementos": len(
-                          data.get("features", [])
-                      )
+                  cx,cy=poly_utm.centroid.x,poly_utm.centroid.y
+                  c=transform(WGS.transform, poly_utm.centroid)
+                  params={
+                      'latitude':c.y,'longitude':c.x,'current':'temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m','hourly':'temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m','daily':'temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant,sunrise,sunset','timezone':'Europe/Madrid','forecast_days':7
                   }
+                  r=requests.get('https://api.open-meteo.com/v1/forecast',params=params,timeout=60); r.raise_for_status()
+                  forecast=r.json()
+                  save('clima/pronostico_7_dias.json',forecast)
+                  # Histórico reciente de 5 años para contexto climático local
+                  end=datetime.now(timezone.utc).date(); start=end-timedelta(days=5*365)
+                  hp={'latitude':c.y,'longitude':c.x,'start_date':start.isoformat(),'end_date':end.isoformat(),'daily':'temperature_2m_mean,precipitation_sum,wind_speed_10m_mean,sunshine_duration','timezone':'Europe/Madrid'}
+                  hr=requests.get('https://archive-api.open-meteo.com/v1/archive',params=hp,timeout=120); hr.raise_for_status(); hist=hr.json(); save('clima/historico_5_anos.json',hist)
+                  save('clima/resultado.json',{'agente':'clima','estado':'OK','centroide':[c.y,c.x],'pronostico_fechas':forecast.get('daily',{}).get('time',[]),'modelo_altitud_m':forecast.get('elevation'),'historico_desde':start.isoformat(),'historico_hasta':end.isoformat(),'fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail('clima',e)
 
-                  with open(
-                      OUT / f"{nombre}.geojson",
-                      "w",
-                      encoding="utf-8"
-                  ) as f:
-                      json.dump(
-                          data,
-                          f,
-                          ensure_ascii=False,
-                          indent=2
-                      )
-
-              except Exception as e:
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "ERROR",
-                      "error": str(e)
-                  }
-
-          resultado["advertencia"] = (
-              "La cartografía de suelo no sustituye un análisis "
-              "físico-químico realizado sobre muestras de campo."
-          )
-
-          with open(
-              OUT / "suelo.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente suelo terminado.")
-          PY
-
-      # ============================================================
-      # 7. AGENTE VEGETACIÓN / USO DEL SUELO
-      # ============================================================
-
-      - name: Crear agente vegetación
-        run: |
-          cat > agentes/vegetacion.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-          from pyproj import Transformer
-
-          OUT = Path("expediente/vegetacion")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          transformer = Transformer.from_crs(
-              "EPSG:4326",
-              "EPSG:25830",
-              always_xy=True
-          )
-
-          x, y = transformer.transform(lon, lat)
-
-          radio = finca["radio_busqueda_m"]
-
-          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "mca_2023": "OCUPAC_Pol_MCA_VE2023"
-          }
-
-          resultado = {
-              "agente": "vegetacion",
-              "estado": "OK",
-              "bbox_utm": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typenames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:25830",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
+          def cadastre_agent(poly_utm):
               try:
+                  pts=[poly_utm.centroid]
+                  coords=list(poly_utm.exterior.coords)
+                  for i in range(0,len(coords)-1,max(1,(len(coords)-1)//8)):
+                      from shapely.geometry import Point
+                      pts.append(Point(coords[i]))
+                  refs=[]
+                  for p in pts:
+                      try:
+                          q={'SRS':'EPSG:25830','Coordenada_X':f'{p.x:.3f}','Coordenada_Y':f'{p.y:.3f}'}
+                          rr=requests.get(CAT,params=q,timeout=30); rr.raise_for_status()
+                          txt=rr.text
+                          refs.append({'x':p.x,'y':p.y,'respuesta_xml':txt})
+                      except Exception as e: refs.append({'x':p.x,'y':p.y,'error':str(e)})
+                  # Extraer referencias de 14-20 caracteres de las respuestas XML
+                  unique=[]
+                  for item in refs:
+                      found=re.findall(r'<(?:pc>|pc1>|ReferenciaCatastral>|rc>|refcat>)([^<\s]{9,20})',item.get('respuesta_xml',''),re.I)
+                      for f in found:
+                          if f not in unique: unique.append(f)
+                  save('parcelas/resultado.json',{'agente':'parcelas','estado':'OK','referencias_detectadas':unique,'consultas_puntos':len(refs),'detalle':refs,'nota':'La geometría de la finca es la del KML del usuario; el Catastro se usa como contraste identificativo.','fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail('parcelas',e)
 
-                  r = requests.get(
-                      url,
-                      params=params,
-                      timeout=120
-                  )
-
-                  r.raise_for_status()
-
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "OK",
-                      "numero_elementos": len(
-                          data.get("features", [])
-                      )
-                  }
-
-                  with open(
-                      OUT / f"{nombre}.geojson",
-                      "w",
-                      encoding="utf-8"
-                  ) as f:
-                      json.dump(
-                          data,
-                          f,
-                          ensure_ascii=False,
-                          indent=2
-                      )
-
-              except Exception as e:
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "ERROR",
-                      "error": str(e)
-                  }
-
-          resultado["fuente"] = (
-              "Mapa de Cultivos y Aprovechamientos de Navarra 2023"
-          )
-
-          with open(
-              OUT / "vegetacion.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente vegetación terminado.")
-          PY
-
-      # ============================================================
-      # 8. AGENTE CLIMA
-      # ============================================================
-
-      - name: Crear agente clima
-        run: |
-          cat > agentes/clima.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-
-          OUT = Path("expediente/clima")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          url = "https://api.open-meteo.com/v1/forecast"
-
-          params = {
-              "latitude": lat,
-              "longitude": lon,
-              "current": ",".join([
-                  "temperature_2m",
-                  "relative_humidity_2m",
-                  "precipitation",
-                  "wind_speed_10m",
-                  "wind_direction_10m"
-              ]),
-              "hourly": ",".join([
-                  "temperature_2m",
-                  "relative_humidity_2m",
-                  "precipitation",
-                  "wind_speed_10m",
-                  "wind_direction_10m"
-              ]),
-              "daily": ",".join([
-                  "temperature_2m_max",
-                  "temperature_2m_min",
-                  "precipitation_sum",
-                  "wind_speed_10m_max"
-              ]),
-              "forecast_days": 7,
-              "timezone": "Europe/Madrid"
-          }
-
-          resultado = {
-              "agente": "clima",
-              "estado": "OK",
-              "coordenadas": {
-                  "latitud": lat,
-                  "longitud": lon
-              }
-          }
-
-          try:
-
-              r = requests.get(
-                  url,
-                  params=params,
-                  timeout=60
-              )
-
-              r.raise_for_status()
-
-              resultado["datos"] = r.json()
-
-          except Exception as e:
-
-              resultado["estado"] = "ERROR"
-              resultado["error"] = str(e)
-
-          with open(
-              OUT / "clima.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente clima terminado.")
-          PY
-
-      # ============================================================
-      # 9. AGENTE SATÉLITE
-      # ============================================================
-
-      - name: Crear agente satélite
-        run: |
-          cat > agentes/satelite.py <<'PY'
-          import json
-          from pathlib import Path
-
-          OUT = Path("expediente/satelite")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          resultado = {
-              "agente": "satelite",
-              "estado": "OK",
-              "fuentes": {
-                  "pnoa_historico": "https://www.ign.es/wms/pnoa-historico",
-                  "pnoa_actual": "https://www.ign.es/wms-inspire/pnoa-ma",
-                  "wmts_pnoa": "https://www.ign.es/wmts/pnoa-ma"
-              },
-              "objetivos": [
-                  "comparación histórica",
-                  "cambios de cobertura",
-                  "vegetación",
-                  "usos del suelo",
-                  "seguimiento de regeneración"
-              ]
-          }
-
-          with open(
-              OUT / "satelite.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente satélite preparado.")
-          PY
-
-      # ============================================================
-      # 10. AGENTE NORMATIVA / TERRITORIO
-      # ============================================================
-
-      - name: Crear agente normativa
-        run: |
-          cat > agentes/normativa.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-          from pyproj import Transformer
-
-          OUT = Path("expediente/normativa")
-          OUT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          transformer = Transformer.from_crs(
-              "EPSG:4326",
-              "EPSG:25830",
-              always_xy=True
-          )
-
-          x, y = transformer.transform(lon, lat)
-
-          radio = finca["radio_busqueda_m"]
-
-          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "navarra_2000_zonas": "ESTADI_Pol_ZonNav2000",
-              "navarra_2000_areas": "ESTADI_Pol_AreaNav2000",
-              "navarra_2000_subzonas": "ESTADI_Pol_SzonNav2000"
-          }
-
-          resultado = {
-              "agente": "normativa",
-              "estado": "OK",
-              "bbox_utm": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typenames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:25830",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
+          def satellite_agent(poly):
               try:
+                  minlon,minlat,maxlon,maxlat=poly.bounds
+                  end=datetime.now(timezone.utc).date(); start=end-timedelta(days=180)
+                  body={'collections':['sentinel-2-l2a'],'bbox':[minlon,minlat,maxlon,maxlat],'datetime':f'{start.isoformat()}T00:00:00Z/{end.isoformat()}T23:59:59Z','query':{'eo:cloud_cover':{'lte':30}},'limit':50}
+                  r=requests.post('https://stac.dataspace.copernicus.eu/v1/search',json=body,timeout=120); r.raise_for_status(); data=r.json()
+                  items=data.get('features',[])
+                  kept=[]
+                  for it in items:
+                      try:
+                          g=shape(it.get('geometry')) if it.get('geometry') else None
+                          if g and g.intersects(poly): kept.append(it)
+                      except Exception: pass
+                  save('satelite/sentinel2_busqueda.json',{'type':'FeatureCollection','features':kept})
+                  save('satelite/resultado.json',{'agente':'satelite','estado':'OK','items_encontrados':len(kept),'periodo_desde':start.isoformat(),'periodo_hasta':end.isoformat(),'fuente':'Copernicus Data Space STAC sentinel-2-l2a','fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail('satelite',e)
 
-                  r = requests.get(
-                      url,
-                      params=params,
-                      timeout=120
-                  )
-
-                  r.raise_for_status()
-
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "OK",
-                      "numero_elementos": len(
-                          data.get("features", [])
-                      )
-                  }
-
-                  with open(
-                      OUT / f"{nombre}.geojson",
-                      "w",
-                      encoding="utf-8"
-                  ) as f:
-                      json.dump(
-                          data,
-                          f,
-                          ensure_ascii=False,
-                          indent=2
-                      )
-
-              except Exception as e:
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "ERROR",
-                      "error": str(e)
-                  }
-
-          resultado["advertencia"] = (
-              "La cartografía territorial no constituye por sí sola "
-              "asesoramiento jurídico ni determina permisos concretos."
-          )
-
-          with open(
-              OUT / "normativa.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  resultado,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print("Agente normativa terminado.")
-          PY
-
-      # ============================================================
-      # 11. AGENTE MAESTRO
-      # ============================================================
-
-      - name: Crear agente maestro
-        run: |
-          cat > agentes/maestro.py <<'PY'
-          import subprocess
-          import sys
-
-          agentes = [
-              "terreno.py",
-              "parcelas.py",
-              "agua.py",
-              "suelo.py",
-              "vegetacion.py",
-              "clima.py",
-              "satelite.py",
-              "normativa.py"
-          ]
-
-          resultados = {}
-
-          for agente in agentes:
-
-              print("")
-              print("=" * 70)
-              print("EJECUTANDO:", agente)
-              print("=" * 70)
-
-              r = subprocess.run(
-                  [sys.executable, "agentes/" + agente],
-                  check=False
-              )
-
-              resultados[agente] = r.returncode
-
-          print("")
-          print("RESULTADO DE TODOS LOS AGENTES")
-
-          for agente, codigo in resultados.items():
-              print(
-                  agente,
-                  "OK" if codigo == 0 else f"ERROR {codigo}"
-              )
-          PY
-
-      # ============================================================
-      # 12. ANALISTA
-      # ============================================================
-
-      - name: Crear analista
-        run: |
-          cat > agentes/analista.py <<'PY'
-          import json
-          from pathlib import Path
-          from datetime import datetime, timezone
-
-          base = Path("expediente")
-
-          agentes = [
-              "terreno",
-              "parcelas",
-              "agua",
-              "suelo",
-              "vegetacion",
-              "clima",
-              "satelite",
-              "normativa"
-          ]
-
-          informe = {
-              "fecha_utc": datetime.now(timezone.utc).isoformat(),
-              "agentes": {},
-              "resumen": {
-                  "ok": 0,
-                  "errores": 0,
-                  "sin_datos": 0
-              },
-              "datos_faltantes": []
-          }
-
-          for agente in agentes:
-
-              archivo = base / agente / f"{agente}.json"
-
-              if not archivo.exists():
-
-                  informe["agentes"][agente] = {
-                      "estado": "SIN_RESULTADO"
-                  }
-
-                  informe["resumen"]["errores"] += 1
-                  informe["datos_faltantes"].append(agente)
-                  continue
-
+          def sun_agent(poly):
               try:
+                  from astral import LocationInfo
+                  from astral.sun import sun
+                  c=transform(WGS.transform,poly.centroid)
+                  loc=LocationInfo('Finca Lurra','Navarra','Europe/Madrid',c.y,c.x)
+                  days=[]
+                  for month in range(1,13):
+                      d=datetime(2026,month,21,tzinfo=timezone.utc).date()
+                      s=sun(loc.observer,date=d,tzinfo='Europe/Madrid')
+                      sr=s['sunrise']; ss=s['sunset']
+                      days.append({'fecha':d.isoformat(),'amanecer':sr.isoformat(),'puesta':ss.isoformat(),'horas_luz':round((ss-sr).total_seconds()/3600,2)})
+                  save('clima/sol_anual_2026.json',{'agente':'sol','estado':'OK','centroide':[c.y,c.x],'meses':days,'nota':'Radiación solar geométrica; todavía no incorpora obstrucciones locales de árboles/edificios.','fecha_utc':datetime.now(timezone.utc).isoformat()})
+              except Exception as e: fail('clima',e)
 
-                  with open(
-                      archivo,
-                      encoding="utf-8"
-                  ) as f:
-                      datos = json.load(f)
+          def analyst_agent():
+              agents=['finca','terreno','agua','clima','suelo','vegetacion','satelite','parcelas','normativa']
+              rows=[]
+              for a in agents:
+                  p=EXP/a/'resultado.json'
+                  if p.exists():
+                      try:
+                          d=json.loads(p.read_text(encoding='utf-8')); rows.append(d)
+                      except Exception as e: rows.append({'agente':a,'estado':'ERROR','error':str(e)})
+                  else: rows.append({'agente':a,'estado':'SIN_RESULTADO'})
+              gaps=[]
+              for r in rows:
+                  if r.get('estado')!='OK': gaps.append(f"{r.get('agente')}: {r.get('estado')} {r.get('error','')}")
+              gaps.extend([
+                  'Confirmar en campo ubicación de captaciones, manantiales, acequias o depósitos si existen.',
+                  'Para diseñar riego/almacenamiento real hará falta contrastar caudales y derechos de agua cuando proceda.',
+                  'La cartografía de suelo es de escala regional; para agricultura de precisión conviene añadir analítica de suelo de campo.',
+                  'La sombra real de árboles/edificios requiere incorporar obstáculos locales; el análisis solar actual es astronómico.'
+              ])
+              result={'fecha_utc':datetime.now(timezone.utc).isoformat(),'agentes':rows,'huecos_conocidos':gaps,'conclusion':'El expediente ya está preparado para el diseño, pero estas lagunas deben quedar visibles para que el diseñador no las confunda con datos conocidos.'}
+              save('analisis/resultado.json',result)
+              lines=['INFORME AUTOMÁTICO DE LA FINCA','',f'Fecha UTC: {result["fecha_utc"]}','']
+              for r in rows:
+                  lines.append(f"- {r.get('agente')}: {r.get('estado')}")
+              lines += ['', 'DATOS A COMPLETAR / CONTRASTAR:'] + [f'- {g}' for g in gaps]
+              (EXP/'informes/informe-final.txt').write_text('\n'.join(lines),encoding='utf-8')
 
-                  estado = datos.get(
-                      "estado",
-                      "DESCONOCIDO"
-                  )
+          def map_agent(poly):
+              try:
+                  layers=[]
+                  for p in sorted(EXP.glob('*/*.geojson')):
+                      try:
+                          d=json.loads(p.read_text(encoding='utf-8'))
+                          if d.get('features'): layers.append({'nombre':p.stem,'datos':d})
+                      except Exception: pass
+                  geo=json.dumps({'type':'Feature','properties':{'nombre':'2026 LURRA'},'geometry':mapping(poly)},ensure_ascii=False)
+                  layer_js=[]
+                  for item in layers:
+                      layer_js.append(f"L.geoJSON({json.dumps(item['datos'],ensure_ascii=False)},{{style:{{weight:1}}}}).bindTooltip('{item['nombre']}').addTo(map);")
+                  html=f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Finca Lurra</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>html,body,#map{{height:100%;margin:0}}</style></head><body><div id="map"></div><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>const map=L.map('map');L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{attribution:'&copy; OpenStreetMap'}}).addTo(map);const finca=L.geoJSON({geo},{{style:{{color:'#ff8800',weight:4,fillOpacity:0.08}}}}).addTo(map);map.fitBounds(finca.getBounds());{''.join(layer_js)}</script></body></html>'''
+                  Path('public').mkdir(exist_ok=True)
+                  (Path('public')/'index.html').write_text(html,encoding='utf-8')
+                  save('informes/mapa.html',{'publicado':'GitHub Pages','capas_vectoriales':len(layers)})
+              except Exception as e: fail('informes',e)
 
-                  informe["agentes"][agente] = {
-                      "estado": estado
-                  }
+          def main():
+              poly, poly_utm, geom_result = geometry_agent()
+              # Capas verificadas en el catálogo IDENA de agosto de 2026.
+              vector_agent('agua',[
+                  'CARBTU_Lin_Hidrografia_201','CARBTU_Pol_Hidrografia_201',
+                  'HIDROG_Pol_AspHidroGeo','HIDROG_Pol_VulneAcui'
+              ],poly_utm)
+              vector_agent('suelo',[
+                  'EDAFOL_Pol_Suelos25m','AGRICU_Pol_CLAgrol25m','AGRICU_Pol_SCAgrol25m','REGADI_Pol_CLApti25m'
+              ],poly_utm)
+              vector_agent('vegetacion',[
+                  'OCUPAC_Pol_MCA_VE2023','OCUPAC_Pol_MCA_VE2021','OCUPAC_Pol_MCA_VE2019','OCUPAC_Pol_MCA_VE2000','BIODIV_Pol_SerieVegsom'
+              ],poly_utm)
+              vector_agent('normativa',[
+                  'ESTADI_Pol_AreaNav2000','ESTADI_Pol_SzonNav2000','ESTADI_Pol_ZonNav2000',
+                  'BIODIV_Pol_RENA','BIODIV_Pol_ZEPA','BIODIV_Pol_RN2000',
+                  'BIODIV_Pol_ZonasHumedas','FOREST_Pol_MUP1912','GANADE_Lin_VVPPAlinde','GANADE_Lin_VVPPAeje'
+              ],poly_utm)
+              terrain_agent(poly_utm)
+              climate_agent(poly_utm,poly)
+              sun_agent(poly_utm)
+              cadastre_agent(poly_utm)
+              satellite_agent(poly)
+              analyst_agent()
+              map_agent(poly)
+              print('=== SISTEMA MAESTRO TERMINADO ===')
 
-                  if estado == "OK":
-                      informe["resumen"]["ok"] += 1
-                  elif estado == "ERROR":
-                      informe["resumen"]["errores"] += 1
-                      informe["datos_faltantes"].append(agente)
-                  else:
-                      informe["resumen"]["sin_datos"] += 1
-                      informe["datos_faltantes"].append(agente)
-
-              except Exception as e:
-
-                  informe["agentes"][agente] = {
-                      "estado": "ERROR",
-                      "error": str(e)
-                  }
-
-                  informe["resumen"]["errores"] += 1
-                  informe["datos_faltantes"].append(agente)
-
-          informe["criterio"] = (
-              "OK significa que el agente obtuvo una respuesta válida "
-              "de su fuente. No significa que exista información "
-              "suficiente para diseñar la finca."
-          )
-
-          informe["siguiente_fase"] = [
-              "delimitar exactamente la finca",
-              "calcular relieve",
-              "calcular pendientes",
-              "calcular orientación",
-              "identificar agua",
-              "analizar usos y vegetación",
-              "analizar suelo",
-              "analizar normativa",
-              "integrar todas las capas",
-              "preparar diseño de permacultura"
-          ]
-
-          with open(
-              base / "analisis" / "informe_maestro.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              json.dump(
-                  informe,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          print(
-              json.dumps(
-                  informe,
-                  ensure_ascii=False,
-                  indent=2
-              )
-          )
+          if __name__=='__main__':
+              main()
           PY
 
-      # ============================================================
-      # 13. EJECUTAR AGENTES
-      # ============================================================
+      - name: Ejecutar Sistema Maestro
+        run: python agentes/sistema_finca.py
 
-      - name: Ejecutar sistema maestro
-        run: |
-          python agentes/maestro.py
-
-      - name: Ejecutar analista
-        run: |
-          python agentes/analista.py
-
-      # ============================================================
-      # 14. CREAR RESUMEN
-      # ============================================================
-
-      - name: Crear resumen de la finca
+      - name: Crear resumen visible
         run: |
           python - <<'PY'
-          import json
-
-          with open(
-              "expediente/analisis/informe_maestro.json",
-              encoding="utf-8"
-          ) as f:
-              informe = json.load(f)
-
-          with open(
-              "expediente/informes/resumen.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write("LURRA - SISTEMA MAESTRO DE LA FINCA\n")
-              f.write("====================================\n\n")
-
-              f.write(
-                  "Coordenadas: 42.8962739, -1.5961049\n"
-              )
-
-              f.write(
-                  "Altitud de referencia: 590.1082552 m\n"
-              )
-
-              f.write(
-                  "Radio de análisis inicial: 1000 m\n\n"
-              )
-
-              f.write("AGENTES\n")
-              f.write("=======\n")
-
-              for nombre, datos in informe["agentes"].items():
-                  f.write(
-                      f"{nombre}: "
-                      f"{datos.get('estado')}\n"
-                  )
-
-              f.write("\nRESUMEN\n")
-              f.write("=======\n")
-
-              for clave, valor in informe["resumen"].items():
-                  f.write(
-                      f"{clave}: {valor}\n"
-                  )
-
-              f.write("\nDATOS FALTANTES O PROBLEMÁTICOS\n")
-              f.write("===============================\n")
-
-              for dato in informe["datos_faltantes"]:
-                  f.write(f"- {dato}\n")
-
-              f.write("\nSIGUIENTE FASE\n")
-              f.write("==============\n")
-
-              for paso in informe["siguiente_fase"]:
-                  f.write(f"- {paso}\n")
-          PY
-
-      # ============================================================
-      # 15. MAPA WEB
-      # ============================================================
-
-      - name: Crear mapa web
-        run: |
-          python - <<'PY'
-          import json
           from pathlib import Path
-
-          with open(
-              "expediente/finca.json",
-              encoding="utf-8"
-          ) as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          html = f"""
-          <!DOCTYPE html>
-          <html lang="es">
-          <head>
-          <meta charset="utf-8">
-          <meta name="viewport"
-                content="width=device-width,initial-scale=1">
-          <title>Lurra - Finca de permacultura</title>
-
-          <link rel="stylesheet"
-            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-
-          <style>
-          html, body, #map {{
-              height:100%;
-              margin:0;
-          }}
-
-          #info {{
-              position:absolute;
-              z-index:1000;
-              top:10px;
-              left:10px;
-              background:white;
-              padding:14px;
-              border-radius:8px;
-              font-family:Arial,sans-serif;
-              box-shadow:0 2px 10px rgba(0,0,0,.3);
-          }}
-          </style>
-          </head>
-
-          <body>
-
-          <div id="info">
-            <b>LURRA</b><br>
-            Finca de permacultura<br><br>
-            Latitud: {lat}<br>
-            Longitud: {lon}<br>
-            Altitud referencia: {finca["altitud_referencia_m"]} m
-          </div>
-
-          <div id="map"></div>
-
-          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-          <script>
-
-          const lat = {lat};
-          const lon = {lon};
-
-          const map = L.map("map").setView(
-              [lat, lon],
-              15
-          );
-
-          L.tileLayer(
-              "https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
-              {{
-                  attribution:
-                    "&copy; OpenStreetMap contributors"
-              }}
-          ).addTo(map);
-
-          L.marker([lat, lon])
-            .addTo(map)
-            .bindPopup(
-              "<b>Punto de referencia de la finca</b><br>" +
-              lat + ", " + lon
-            )
-            .openPopup();
-
-          L.circle(
-            [lat, lon],
-            {{
-              radius:1000,
-              fill:false
-            }}
-          ).addTo(map);
-
-          </script>
-
-          </body>
-          </html>
-          """
-
-          Path(
-              "public/index.html"
-          ).write_text(
-              html,
-              encoding="utf-8"
-          )
+          import json
+          src=Path('expediente/analisis/resultado.json')
+          lines=['# Sistema Maestro de la Finca','']
+          if src.exists():
+              data=json.loads(src.read_text(encoding='utf-8'))
+              for a in data.get('agentes',[]):
+                  lines.append(f"- {a.get('agente')}: **{a.get('estado')}**")
+              lines += ['', '## Datos a contrastar', '']
+              lines += [f"- {x}" for x in data.get('huecos_conocidos',[])]
+          Path('expediente/RESUMEN.md').write_text('\n'.join(lines),encoding='utf-8')
           PY
 
-      # ============================================================
-      # 16. GITHUB PAGES
-      # ============================================================
-
-      - name: Preparar página
+      - name: Preparar publicación
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Desplegar página
+      - name: Publicar en GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
 
-      # ============================================================
-      # 17. GUARDAR RESULTADOS
-      # ============================================================
-
-      - name: Guardar expediente
+      - name: Guardar expediente completo
         uses: actions/upload-artifact@v4
         with:
-          name: expediente-finca-lurra-completo
+          name: expediente-finca-lurra-final
           path: expediente/
-          retention-days: 90
 
       - name: Guardar agentes
         uses: actions/upload-artifact@v4
         with:
-          name: agentes-finca-lurra-completo
+          name: agentes-finca-lurra-final
           path: agentes/
-          retention-days: 90
