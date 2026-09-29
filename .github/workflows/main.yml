@@ -2,9 +2,10 @@ name: Sistema Maestro de la Finca
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 4 * * 1"
 
+  schedule:
+    - cron: "17 4 * * *"
+      timezone: "Europe/Madrid"
 permissions:
   contents: read
   pages: write
