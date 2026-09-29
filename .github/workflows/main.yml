@@ -11,388 +11,195 @@ permissions:
   id-token: write
 
 jobs:
-  finca:
+  sistema-maestro:
     runs-on: ubuntu-latest
-
-    environment:
-      name: github-pages
 
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Preparar entorno
+      - name: Crear KML de la finca
         run: |
-          python -m pip install --upgrade pip
-          pip install requests shapely pyproj numpy rasterio astral
+          mkdir -p datos agentes expediente public
+          cat > datos/finca.kml <<'KML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>2026 LURRA</name><Placemark><name>Finca</name><Polygon><outerBoundaryIs><LinearRing><coordinates>-1.596431197218195,42.8968811808051,0 -1.596419122461621,42.89671664408164,0 -1.596417388715594,42.89663139381292,0 -1.596391107977928,42.89656291603366,0 -1.596312307142042,42.89633288164908,0 -1.596533407747146,42.89626720394415,0 -1.596628427351301,42.89623473699322,0 -1.596689088413235,42.89620962277233,0 -1.596696679394738,42.89618990559035,0 -1.596658020534545,42.89610877173172,0 -1.596332956684637,42.89576240136823,0 -1.59626531940508,42.89569443903466,0 -1.596107067682474,42.89577054664129,0 -1.595907295118593,42.89586756640147,0 -1.595758779237829,42.89591882794478,0 -1.596059672721568,42.89616500769569,0 -1.595851356400495,42.89631416046074,0 -1.595947449480188,42.89639274547473,0 -1.595951726480532,42.89639547208808,0 -1.595610189094819,42.89664924771686,0 -1.595591114087875,42.89665794963233,0 -1.595618407888095,42.89667388391324,0 -1.59567945240036,42.89670180403568,0 -1.595766305559175,42.89674833022713,0 -1.59593872384984,42.89684225847299,0 -1.595982016240013,42.89686324925874,0 -1.596148017644925,42.89687785146882,0 -1.596298573789157,42.89688214238888,0 -1.596431197218195,42.8968811808051,0</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>
+          KML
 
-      - name: Crear motor de agentes
+      - name: Instalar dependencias
+        run: python -m pip install --disable-pip-version-check requests pyproj shapely
+
+      - name: Crear agente maestro
         run: |
-          mkdir -p agentes
           cat > agentes/sistema_finca.py <<'PY'
-          import json, math, re, sys, traceback
+          import json
           from pathlib import Path
-          from datetime import datetime, timedelta, timezone
-          import xml.etree.ElementTree as ET
+          from xml.etree import ElementTree as ET
           import requests
-          import numpy as np
-          from shapely.geometry import shape, mapping, Polygon, box
-          from shapely.ops import transform
-          from pyproj import Transformer
-
-          ROOT = Path('.')
+          from pyproj import Geod
+          from shapely.geometry import Polygon, shape, mapping
+          
+          ROOT = Path(__file__).resolve().parents[1]
+          KML = ROOT / 'datos' / 'finca.kml'
           EXP = ROOT / 'expediente'
-          for d in ['finca','terreno','agua','clima','suelo','vegetacion','satelite','parcelas','normativa','analisis','informes']:
-              (EXP / d).mkdir(parents=True, exist_ok=True)
-
-          LAT = 42.8962739
-          LON = -1.5961049
-          ALT_REF = 590.1082552
-          IDENA = 'https://idena.navarra.es/ogc/wfs'
-          CAT = 'https://ovc.catastro.meh.es/ovcservweb/OVCSWLocalizacionRC/OVCCoordenadas.asmx/Consulta_RCCOOR'
-          UTM = Transformer.from_crs(4326, 25830, always_xy=True)
-          WGS = Transformer.from_crs(25830, 4326, always_xy=True)
-
-          def save(path, data):
-              p = EXP / path
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-
-          def fail(agent, exc):
-              save(f'{agent}/resultado.json', {
-                  'agente': agent,
-                  'estado': 'ERROR',
-                  'error': str(exc),
-                  'fecha_utc': datetime.now(timezone.utc).isoformat()
-              })
-              print(f'[ERROR] {agent}: {exc}')
-              traceback.print_exc()
-
-          def kml_polygon():
-              candidates = list((ROOT / 'datos').glob('*.kml')) if (ROOT / 'datos').exists() else []
-              candidates += list(ROOT.glob('*.kml'))
-              candidates += list(ROOT.glob('**/*.kml'))
-              seen=[]; unique=[]
-              for p in candidates:
-                  if p not in seen:
-                      seen.append(p); unique.append(p)
-              if not unique:
-                  raise FileNotFoundError('No se encontró ningún KML. Debe existir un .kml en datos/ o en la raíz del repositorio.')
-              path = unique[0]
-              root = ET.fromstring(path.read_text(encoding='utf-8'))
-              ns={'k':'http://www.opengis.net/kml/2.2'}
-              polys=[]
-              for pm in root.findall('.//k:Placemark', ns):
-                  c = pm.find('.//k:Polygon//k:outerBoundaryIs//k:LinearRing//k:coordinates', ns)
-                  if c is None or not c.text: continue
-                  pts=[]
-                  for item in re.split(r'\s+', c.text.strip()):
-                      vals=item.split(',')
-                      if len(vals)>=2:
-                          pts.append((float(vals[0]), float(vals[1])))
-                  if len(pts)>=4:
-                      poly=Polygon(pts)
-                      if poly.is_valid and poly.area>0: polys.append((poly, pm.findtext('k:name', default='', namespaces=ns)))
-              if not polys: raise ValueError(f'No hay un polígono válido en {path}')
-              poly,name=max(polys, key=lambda t:t[0].area)
-              if not poly.equals_exact(Polygon(list(poly.exterior.coords)), 1e-12):
-                  poly=poly.buffer(0)
-              return path, poly, name or '2026 LURRA'
-
-          def geometry_agent():
-              path, poly, name = kml_polygon()
-              poly_utm = transform(UTM.transform, poly)
-              centroid_utm=poly_utm.centroid
-              centroid_wgs=transform(WGS.transform, centroid_utm)
-              minx,miny,maxx,maxy=poly_utm.bounds
-              result={
-                  'agente':'finca', 'estado':'OK',
-                  'fuente_kml':str(path), 'nombre':name,
-                  'vertices':len(list(poly.exterior.coords))-1,
-                  'superficie_m2':poly_utm.area,
-                  'superficie_ha':poly_utm.area/10000.0,
-                  'perimetro_m':poly_utm.length,
-                  'bbox_utm25830':[minx,miny,maxx,maxy],
-                  'centroide':[centroid_wgs.x,centroid_wgs.y],
-                  'punto_referencia':[LAT,LON],
-                  'altitud_referencia_m':ALT_REF,
-                  'crs':'EPSG:4326 / EPSG:25830',
-                  'fecha_utc':datetime.now(timezone.utc).isoformat()
-              }
-              save('finca/resultado.json',result)
-              save('finca/finca.geojson',{
-                  'type':'FeatureCollection','features':[{
-                      'type':'Feature','properties':{'nombre':name,'area_m2':poly_utm.area,'area_ha':poly_utm.area/10000.0},
-                      'geometry':mapping(poly)
-                  }], 'crs':{'type':'name','properties':{'name':'EPSG:4326'}}
-              })
-              return poly, poly_utm, result
-
-          def wfs_query(layer, bbox, max_features=5000):
-              params={
-                  'service':'WFS','version':'2.0.0','request':'GetFeature',
-                  'typeNames':f'IDENA:{layer}','outputFormat':'application/json',
-                  'srsName':'EPSG:25830','count':str(max_features),
-                  'bbox':','.join(f'{v:.3f}' for v in bbox)+',EPSG:25830'
-              }
-              r=requests.get(IDENA, params=params, timeout=60)
-              r.raise_for_status()
-              return r.json(), r.url
-
-          def clip_features(data, poly_utm):
-              out=[]
-              for feat in data.get('features',[]):
-                  geom=feat.get('geometry')
-                  if not geom: continue
-                  try: g=shape(geom)
-                  except Exception: continue
-                  if not g.is_valid: g=g.buffer(0)
-                  if not g.intersects(poly_utm): continue
-                  inter=g.intersection(poly_utm)
-                  p=dict(feat.get('properties') or {})
-                  p['_intersect_area_m2']=inter.area if hasattr(inter,'area') else 0
-                  p['_source_area_m2']=g.area if hasattr(g,'area') else None
-                  p['_inside_pct']= (100*p['_intersect_area_m2']/p['_source_area_m2']) if p.get('_source_area_m2') else None
-                  inter_wgs=transform(WGS.transform, inter)
-                  out.append({'type':'Feature','properties':p,'geometry':mapping(inter_wgs)})
-              return {'type':'FeatureCollection','features':out,'crs':{'type':'name','properties':{'name':'EPSG:4326'}}}
-
-          def vector_agent(agent, layers, poly_utm):
+          LAT, LON, ALT_REF = 42.8962739, -1.5961049, 590.1082552
+          
+          def write_json(path, data):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+          
+          def get(url, **kwargs):
               try:
-                  bbox=poly_utm.bounds
-                  results=[]; errors=[]
-                  for layer in layers:
-                      try:
-                          data,url=wfs_query(layer,bbox)
-                          clipped=clip_features(data,poly_utm)
-                          out=EXP/agent/f'{layer}.geojson'
-                          out.write_text(json.dumps(clipped,ensure_ascii=False,indent=2),encoding='utf-8')
-                          results.append({'layer':layer,'estado':'OK','encontrados':len(data.get('features',[])),'dentro_finca':len(clipped['features']),'url':url})
-                      except Exception as e:
-                          errors.append({'layer':layer,'error':str(e)})
-                          results.append({'layer':layer,'estado':'ERROR','error':str(e)})
-                  status='OK' if any(x['estado']=='OK' and x.get('dentro_finca',0)>=0 for x in results) else 'ERROR'
-                  save(f'{agent}/resultado.json',{'agente':agent,'estado':status,'capas':results,'errores':errors,'fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail(agent,e)
-
-          def terrain_agent(poly_utm):
-              try:
-                  minx,miny,maxx,maxy=poly_utm.bounds
-                  pad=10
-                  bbox=[minx-pad,miny-pad,maxx+pad,maxy+pad]
-                  stats={'bbox_utm25830':bbox,'resolucion_m':5}
-                  url='https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_25830_5_PB/coverage'
-                  r=requests.get(url,params={'bbox':','.join(f'{x:.3f}' for x in bbox),'bbox-crs':'25830','f':'COG'},timeout=120)
+                  r = requests.get(url, timeout=40, **kwargs)
                   r.raise_for_status()
-                  tif=EXP/'terreno/mdt5_finca.tif'
-                  tif.write_bytes(r.content)
-                  import rasterio
-                  from rasterio.mask import mask
-                  from rasterio.transform import xy
-                  with rasterio.open(tif) as src:
-                      arr, out_transform=mask(src,[mapping(poly_utm)],crop=True,filled=False)
-                      data=arr[0].astype('float64')
-                      vals=data.compressed()
-                      if vals.size==0: raise ValueError('El MDT no devuelve celdas dentro del polígono.')
-                      stats.update({'celdas_validas':int(vals.size),'elevacion_min_m':float(np.min(vals)),'elevacion_max_m':float(np.max(vals)),'elevacion_media_m':float(np.mean(vals)),'elevacion_mediana_m':float(np.median(vals))})
-                      # Pendiente y orientación aproximadas a partir de la malla de 5 m
-                      filled=data.copy()
-                      nodata_mask=np.ma.getmaskarray(arr[0])
-                      filled[nodata_mask]=float(np.nanmedian(vals))
-                      px=abs(src.transform.a); py=abs(src.transform.e)
-                      dzdy,dzdx=np.gradient(filled,py,px)
-                      slope=np.degrees(np.arctan(np.sqrt(dzdx**2+dzdy**2)))
-                      aspect=(np.degrees(np.arctan2(-dzdx,dzdy))+360)%360
-                      sm=slope[~nodata_mask]; am=aspect[~nodata_mask]
-                      stats.update({'pendiente_media_grados':float(np.mean(sm)),'pendiente_max_grados':float(np.max(sm)),'orientacion_media_grados':float((math.degrees(math.atan2(np.mean(np.sin(np.radians(am))),np.mean(np.cos(np.radians(am)))))+360)%360)})
-                  save('terreno/resultado.json',{'agente':'terreno','estado':'OK','fuente':url,'estadisticas':stats,'fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail('terreno',e)
-
-          def climate_agent(poly_utm, poly):
+                  return r
+              except Exception as e:
+                  return e
+          
+          def read_kml_polygon():
+              ns={'k':'http://www.opengis.net/kml/2.2'}
+              root=ET.parse(KML).getroot()
+              el=root.find('.//k:Polygon/k:outerBoundaryIs/k:LinearRing/k:coordinates', ns)
+              if el is None:
+                  raise RuntimeError('No se encontró un Polygon en el KML')
+              pts=[]
+              for token in el.text.split():
+                  p=token.split(',')
+                  pts.append((float(p[0]), float(p[1])))
+              if pts[0] != pts[-1]:
+                  pts.append(pts[0])
+              return pts
+          
+          def geometry_agent():
+              pts=read_kml_polygon()
+              poly=Polygon(pts)
+              if not poly.is_valid:
+                  poly=poly.buffer(0)
+              geod=Geod(ellps='WGS84')
+              area, perimeter = geod.geometry_area_perimeter(poly)
+              result={'nombre':'2026 LURRA','vertices':len(pts)-1,'area_m2':abs(area),'area_ha':abs(area)/10000,'perimetro_m':abs(perimeter),'latitud_referencia':LAT,'longitud_referencia':LON,'altitud_referencia_m':ALT_REF,'epsg':'EPSG:4326'}
+              write_json(EXP/'geometria'/'finca.json', result)
+              write_json(EXP/'geometria'/'finca.geojson', {'type':'FeatureCollection','features':[{'type':'Feature','properties':result,'geometry':mapping(poly)}]})
+              return poly, result
+          
+          def climate_agent():
+              params={'latitude':LAT,'longitude':LON,'current':'temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m','daily':'temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max','forecast_days':7,'timezone':'Europe/Madrid'}
+              r=get('https://api.open-meteo.com/v1/forecast', params=params)
+              if isinstance(r, Exception):
+                  return {'agente':'clima','estado':'ERROR','error':str(r)}
+              data=r.json()
+              write_json(EXP/'clima'/'open-meteo.json',data)
+              return {'agente':'clima','estado':'OK','elevacion_modelo_m':data.get('elevation')}
+          
+          def wfs_agent(name, layer, folder, poly):
+              minx,miny,maxx,maxy=poly.bounds
+              params={'service':'WFS','version':'2.0.0','request':'GetFeature','typeNames':'IDENA:'+layer,'outputFormat':'application/json','srsName':'EPSG:4326','bbox':f'{minx},{miny},{maxx},{maxy},EPSG:4326','count':1000}
+              r=get('https://idena.navarra.es/ogc/wfs', params=params)
+              out={'agente':name,'capa':layer}
+              if isinstance(r, Exception):
+                  out.update(estado='ERROR',error=str(r))
+                  write_json(EXP/folder/(layer+'.json'),out)
+                  return out
               try:
-                  cx,cy=poly_utm.centroid.x,poly_utm.centroid.y
-                  c=transform(WGS.transform, poly_utm.centroid)
-                  params={
-                      'latitude':c.y,'longitude':c.x,'current':'temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m','hourly':'temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m','daily':'temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant,sunrise,sunset','timezone':'Europe/Madrid','forecast_days':7
-                  }
-                  r=requests.get('https://api.open-meteo.com/v1/forecast',params=params,timeout=60); r.raise_for_status()
-                  forecast=r.json()
-                  save('clima/pronostico_7_dias.json',forecast)
-                  # Histórico reciente de 5 años para contexto climático local
-                  end=datetime.now(timezone.utc).date(); start=end-timedelta(days=5*365)
-                  hp={'latitude':c.y,'longitude':c.x,'start_date':start.isoformat(),'end_date':end.isoformat(),'daily':'temperature_2m_mean,precipitation_sum,wind_speed_10m_mean,sunshine_duration','timezone':'Europe/Madrid'}
-                  hr=requests.get('https://archive-api.open-meteo.com/v1/archive',params=hp,timeout=120); hr.raise_for_status(); hist=hr.json(); save('clima/historico_5_anos.json',hist)
-                  save('clima/resultado.json',{'agente':'clima','estado':'OK','centroide':[c.y,c.x],'pronostico_fechas':forecast.get('daily',{}).get('time',[]),'modelo_altitud_m':forecast.get('elevation'),'historico_desde':start.isoformat(),'historico_hasta':end.isoformat(),'fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail('clima',e)
-
-          def cadastre_agent(poly_utm):
-              try:
-                  pts=[poly_utm.centroid]
-                  coords=list(poly_utm.exterior.coords)
-                  for i in range(0,len(coords)-1,max(1,(len(coords)-1)//8)):
-                      from shapely.geometry import Point
-                      pts.append(Point(coords[i]))
-                  refs=[]
-                  for p in pts:
+                  data=r.json()
+                  feats=[]
+                  for f in data.get('features',[]):
                       try:
-                          q={'SRS':'EPSG:25830','Coordenada_X':f'{p.x:.3f}','Coordenada_Y':f'{p.y:.3f}'}
-                          rr=requests.get(CAT,params=q,timeout=30); rr.raise_for_status()
-                          txt=rr.text
-                          refs.append({'x':p.x,'y':p.y,'respuesta_xml':txt})
-                      except Exception as e: refs.append({'x':p.x,'y':p.y,'error':str(e)})
-                  # Extraer referencias de 14-20 caracteres de las respuestas XML
-                  unique=[]
-                  for item in refs:
-                      found=re.findall(r'<(?:pc>|pc1>|ReferenciaCatastral>|rc>|refcat>)([^<\s]{9,20})',item.get('respuesta_xml',''),re.I)
-                      for f in found:
-                          if f not in unique: unique.append(f)
-                  save('parcelas/resultado.json',{'agente':'parcelas','estado':'OK','referencias_detectadas':unique,'consultas_puntos':len(refs),'detalle':refs,'nota':'La geometría de la finca es la del KML del usuario; el Catastro se usa como contraste identificativo.','fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail('parcelas',e)
-
+                          if shape(f.get('geometry')).intersects(poly):
+                              feats.append(f)
+                      except Exception:
+                          pass
+                  write_json(EXP/folder/(layer+'.json'), {'type':'FeatureCollection','features':feats,'source_numberMatched':data.get('numberMatched')})
+                  out.update(estado='OK',en_bbox=len(data.get('features',[])),dentro_finca=len(feats))
+              except Exception as e:
+                  out.update(estado='ERROR',error=str(e))
+              return out
+          
+          def terrain_agent():
+              url='https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_5_PB'
+              r=get(url, params={'f':'json'})
+              out={'agente':'terreno','fuente':url}
+              if isinstance(r, Exception):
+                  out.update(estado='ERROR',error=str(r))
+              else:
+                  write_json(EXP/'terreno'/'mdt5m-metadata.json', r.json())
+                  out['estado']='OK'
+              return out
+          
           def satellite_agent(poly):
+              minx,miny,maxx,maxy=poly.bounds
+              body={'bbox':[minx,miny,maxx,maxy],'datetime':'2024-01-01T00:00:00Z/..','collections':['sentinel-2-l2a'],'limit':50}
               try:
-                  minlon,minlat,maxlon,maxlat=poly.bounds
-                  end=datetime.now(timezone.utc).date(); start=end-timedelta(days=180)
-                  body={'collections':['sentinel-2-l2a'],'bbox':[minlon,minlat,maxlon,maxlat],'datetime':f'{start.isoformat()}T00:00:00Z/{end.isoformat()}T23:59:59Z','query':{'eo:cloud_cover':{'lte':30}},'limit':50}
-                  r=requests.post('https://stac.dataspace.copernicus.eu/v1/search',json=body,timeout=120); r.raise_for_status(); data=r.json()
-                  items=data.get('features',[])
-                  kept=[]
-                  for it in items:
-                      try:
-                          g=shape(it.get('geometry')) if it.get('geometry') else None
-                          if g and g.intersects(poly): kept.append(it)
-                      except Exception: pass
-                  save('satelite/sentinel2_busqueda.json',{'type':'FeatureCollection','features':kept})
-                  save('satelite/resultado.json',{'agente':'satelite','estado':'OK','items_encontrados':len(kept),'periodo_desde':start.isoformat(),'periodo_hasta':end.isoformat(),'fuente':'Copernicus Data Space STAC sentinel-2-l2a','fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail('satelite',e)
-
-          def sun_agent(poly):
-              try:
-                  from astral import LocationInfo
-                  from astral.sun import sun
-                  c=transform(WGS.transform,poly.centroid)
-                  loc=LocationInfo('Finca Lurra','Navarra','Europe/Madrid',c.y,c.x)
-                  days=[]
-                  for month in range(1,13):
-                      d=datetime(2026,month,21,tzinfo=timezone.utc).date()
-                      s=sun(loc.observer,date=d,tzinfo='Europe/Madrid')
-                      sr=s['sunrise']; ss=s['sunset']
-                      days.append({'fecha':d.isoformat(),'amanecer':sr.isoformat(),'puesta':ss.isoformat(),'horas_luz':round((ss-sr).total_seconds()/3600,2)})
-                  save('clima/sol_anual_2026.json',{'agente':'sol','estado':'OK','centroide':[c.y,c.x],'meses':days,'nota':'Radiación solar geométrica; todavía no incorpora obstrucciones locales de árboles/edificios.','fecha_utc':datetime.now(timezone.utc).isoformat()})
-              except Exception as e: fail('clima',e)
-
-          def analyst_agent():
-              agents=['finca','terreno','agua','clima','suelo','vegetacion','satelite','parcelas','normativa']
-              rows=[]
-              for a in agents:
-                  p=EXP/a/'resultado.json'
-                  if p.exists():
-                      try:
-                          d=json.loads(p.read_text(encoding='utf-8')); rows.append(d)
-                      except Exception as e: rows.append({'agente':a,'estado':'ERROR','error':str(e)})
-                  else: rows.append({'agente':a,'estado':'SIN_RESULTADO'})
-              gaps=[]
-              for r in rows:
-                  if r.get('estado')!='OK': gaps.append(f"{r.get('agente')}: {r.get('estado')} {r.get('error','')}")
-              gaps.extend([
-                  'Confirmar en campo ubicación de captaciones, manantiales, acequias o depósitos si existen.',
-                  'Para diseñar riego/almacenamiento real hará falta contrastar caudales y derechos de agua cuando proceda.',
-                  'La cartografía de suelo es de escala regional; para agricultura de precisión conviene añadir analítica de suelo de campo.',
-                  'La sombra real de árboles/edificios requiere incorporar obstáculos locales; el análisis solar actual es astronómico.'
-              ])
-              result={'fecha_utc':datetime.now(timezone.utc).isoformat(),'agentes':rows,'huecos_conocidos':gaps,'conclusion':'El expediente ya está preparado para el diseño, pero estas lagunas deben quedar visibles para que el diseñador no las confunda con datos conocidos.'}
-              save('analisis/resultado.json',result)
-              lines=['INFORME AUTOMÁTICO DE LA FINCA','',f'Fecha UTC: {result["fecha_utc"]}','']
-              for r in rows:
-                  lines.append(f"- {r.get('agente')}: {r.get('estado')}")
-              lines += ['', 'DATOS A COMPLETAR / CONTRASTAR:'] + [f'- {g}' for g in gaps]
-              (EXP/'informes/informe-final.txt').write_text('\n'.join(lines),encoding='utf-8')
-
-          def map_agent(poly):
-              try:
-                  layers=[]
-                  for p in sorted(EXP.glob('*/*.geojson')):
-                      try:
-                          d=json.loads(p.read_text(encoding='utf-8'))
-                          if d.get('features'): layers.append({'nombre':p.stem,'datos':d})
-                      except Exception: pass
-                  geo=json.dumps({'type':'Feature','properties':{'nombre':'2026 LURRA'},'geometry':mapping(poly)},ensure_ascii=False)
-                  layer_js=[]
-                  for item in layers:
-                      layer_js.append(f"L.geoJSON({json.dumps(item['datos'],ensure_ascii=False)},{{style:{{weight:1}}}}).bindTooltip('{item['nombre']}').addTo(map);")
-                  html=f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Finca Lurra</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>html,body,#map{{height:100%;margin:0}}</style></head><body><div id="map"></div><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>const map=L.map('map');L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{attribution:'&copy; OpenStreetMap'}}).addTo(map);const finca=L.geoJSON({geo},{{style:{{color:'#ff8800',weight:4,fillOpacity:0.08}}}}).addTo(map);map.fitBounds(finca.getBounds());{''.join(layer_js)}</script></body></html>'''
-                  Path('public').mkdir(exist_ok=True)
-                  (Path('public')/'index.html').write_text(html,encoding='utf-8')
-                  save('informes/mapa.html',{'publicado':'GitHub Pages','capas_vectoriales':len(layers)})
-              except Exception as e: fail('informes',e)
-
+                  r=requests.post('https://catalogue.dataspace.copernicus.eu/stac/search',json=body,timeout=50)
+                  r.raise_for_status()
+                  data=r.json()
+                  write_json(EXP/'satelite'/'sentinel2-stac.json',data)
+                  return {'agente':'satelite','estado':'OK','elementos':len(data.get('features',[]))}
+              except Exception as e:
+                  out={'agente':'satelite','estado':'ERROR','error':str(e)}
+                  write_json(EXP/'satelite'/'resultado.json',out)
+                  return out
+          
+          def make_map(poly):
+              gj=json.dumps({'type':'Feature','properties':{},'geometry':mapping(poly)},ensure_ascii=False)
+              html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Finca Lurra</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>html,body,#map{height:100%;margin:0}</style></head><body><div id="map"></div><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>const finca=GEOJSON;const m=L.map('map').setView([LAT,LON],17);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap'}).addTo(m);const c=L.geoJSON(finca).addTo(m);m.fitBounds(c.getBounds());L.marker([LAT,LON]).addTo(m).bindPopup('Punto de referencia');</script></body></html>'''
+              html=html.replace('GEOJSON',gj).replace('LAT',str(LAT)).replace('LON',str(LON))
+              (ROOT/'public').mkdir(exist_ok=True)
+              (ROOT/'public'/'index.html').write_text(html,encoding='utf-8')
+          
           def main():
-              poly, poly_utm, geom_result = geometry_agent()
-              # Capas verificadas en el catálogo IDENA de agosto de 2026.
-              vector_agent('agua',[
-                  'CARBTU_Lin_Hidrografia_201','CARBTU_Pol_Hidrografia_201',
-                  'HIDROG_Pol_AspHidroGeo','HIDROG_Pol_VulneAcui'
-              ],poly_utm)
-              vector_agent('suelo',[
-                  'EDAFOL_Pol_Suelos25m','AGRICU_Pol_CLAgrol25m','AGRICU_Pol_SCAgrol25m','REGADI_Pol_CLApti25m'
-              ],poly_utm)
-              vector_agent('vegetacion',[
-                  'OCUPAC_Pol_MCA_VE2023','OCUPAC_Pol_MCA_VE2021','OCUPAC_Pol_MCA_VE2019','OCUPAC_Pol_MCA_VE2000','BIODIV_Pol_SerieVegsom'
-              ],poly_utm)
-              vector_agent('normativa',[
-                  'ESTADI_Pol_AreaNav2000','ESTADI_Pol_SzonNav2000','ESTADI_Pol_ZonNav2000',
-                  'BIODIV_Pol_RENA','BIODIV_Pol_ZEPA','BIODIV_Pol_RN2000',
-                  'BIODIV_Pol_ZonasHumedas','FOREST_Pol_MUP1912','GANADE_Lin_VVPPAlinde','GANADE_Lin_VVPPAeje'
-              ],poly_utm)
-              terrain_agent(poly_utm)
-              climate_agent(poly_utm,poly)
-              sun_agent(poly_utm)
-              cadastre_agent(poly_utm)
-              satellite_agent(poly)
-              analyst_agent()
-              map_agent(poly)
-              print('=== SISTEMA MAESTRO TERMINADO ===')
-
+              poly, geom = geometry_agent()
+              results=[{'agente':'geometria','estado':'OK','datos':geom}, terrain_agent(), climate_agent()]
+              layers=[
+                ('agua','CARBTU_Lin_Hidrografia_201','agua'),
+                ('agua_superficial','CARBTU_Pol_Hidrografia_201','agua'),
+                ('vegetacion','OCUPAC_Pol_MCA_VE2023','vegetacion'),
+                ('suelo','EDAFOL_Pol_Suelos25m','suelo'),
+                ('agricultura','AGRICU_Pol_CLAgrol25m','suelo'),
+                ('regulacion','ESTADI_Pol_ZonNav2000','normativa'),
+                ('regulacion_area','ESTADI_Pol_AreaNav2000','normativa'),
+                ('regulacion_subzona','ESTADI_Pol_SzonNav2000','normativa')
+              ]
+              for x in layers:
+                  results.append(wfs_agent(*x, poly))
+              results.append(satellite_agent(poly))
+              write_json(EXP/'analisis'/'estado-agentes.json',results)
+              ok=sum(1 for x in results if x.get('estado')=='OK')
+              err=len(results)-ok
+              write_json(EXP/'analisis'/'resumen.json',{'finca':geom,'agentes':len(results),'ok':ok,'errores':err,'nota':'OK = fuente respondió; se distingue de cobertura encontrada dentro de la finca.'})
+              (EXP/'informes').mkdir(parents=True,exist_ok=True)
+              (EXP/'informes'/'resumen.txt').write_text(f"FINCA LURRA\nSuperficie: {geom['area_m2']:.2f} m2 ({geom['area_ha']:.4f} ha)\nPerimetro: {geom['perimetro_m']:.2f} m\nAgentes ejecutados: {len(results)} | OK: {ok} | ERROR: {err}\n",encoding='utf-8')
+              make_map(poly)
+              print(json.dumps({'superficie_m2':geom['area_m2'],'superficie_ha':geom['area_ha'],'agentes':len(results),'ok':ok,'errores':err},ensure_ascii=False,indent=2))
+          
           if __name__=='__main__':
               main()
           PY
 
-      - name: Ejecutar Sistema Maestro
+      - name: Ejecutar sistema maestro
         run: python agentes/sistema_finca.py
 
-      - name: Crear resumen visible
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import json
-          src=Path('expediente/analisis/resultado.json')
-          lines=['# Sistema Maestro de la Finca','']
-          if src.exists():
-              data=json.loads(src.read_text(encoding='utf-8'))
-              for a in data.get('agentes',[]):
-                  lines.append(f"- {a.get('agente')}: **{a.get('estado')}**")
-              lines += ['', '## Datos a contrastar', '']
-              lines += [f"- {x}" for x in data.get('huecos_conocidos',[])]
-          Path('expediente/RESUMEN.md').write_text('\n'.join(lines),encoding='utf-8')
-          PY
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
 
-      - name: Preparar publicación
+      - name: Publicar mapa
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Publicar en GitHub Pages
-        id: deployment
+      - name: Desplegar GitHub Pages
         uses: actions/deploy-pages@v4
 
-      - name: Guardar expediente completo
+      - name: Guardar expediente
         uses: actions/upload-artifact@v4
         with:
           name: expediente-finca-lurra-final
-          path: expediente
+          path: expediente/
 
-      - name: Guardar agentes
+      - name: Guardar sistema y geometria
         uses: actions/upload-artifact@v4
         with:
-          name: agentes-finca-lurra-final
-          path: agentes
+          name: sistema-finca-lurra-final
+          path: |
+            agentes/
+            datos/finca.kml
