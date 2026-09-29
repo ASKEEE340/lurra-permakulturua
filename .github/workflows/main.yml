@@ -3,7 +3,7 @@ name: Sistema Maestro de la Finca
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 4 * * 1"
 
 permissions:
   contents: read
@@ -33,10 +33,10 @@ jobs:
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests pyproj
 
       # ============================================================
-      # 2. CONFIGURACIÓN CENTRAL DE LA FINCA
+      # 2. CONFIGURACIÓN CENTRAL
       # ============================================================
 
       - name: Crear configuración de la finca
@@ -49,15 +49,10 @@ jobs:
               "longitud": -1.5961049
             },
             "altitud_referencia_m": 590.1082552,
-            "sistema_coordenadas": "WGS84 / EPSG:4326",
-            "radio_inicial_m": 1000,
-            "objetivo": "Regeneración del terreno, vida en la finca y diseño de permacultura",
-            "fuentes_principales": {
-              "idena": "https://idena.navarra.es/ogc/wfs",
-              "ign_coverages": "https://api-coverages.idee.es",
-              "pnoa": "https://www.ign.es/wms/pnoa-historico",
-              "clima": "https://api.open-meteo.com/v1/forecast"
-            }
+            "sistema_coordenadas": "EPSG:4326",
+            "utm": "EPSG:25830",
+            "radio_busqueda_m": 1000,
+            "objetivo": "Regeneración del terreno, vida en la finca y diseño de permacultura"
           }
           EOF
 
@@ -72,8 +67,8 @@ jobs:
           import requests
           from pathlib import Path
 
-          ROOT = Path("expediente/terreno")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/terreno")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           with open("expediente/finca.json", encoding="utf-8") as f:
               finca = json.load(f)
@@ -81,45 +76,125 @@ jobs:
           lat = finca["coordenadas"]["latitud"]
           lon = finca["coordenadas"]["longitud"]
 
-          fuentes = {
-              "api_coverages_ign": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_5_PB",
-              "api_coverages_ign_25m": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_25_PB"
-          }
-
           resultado = {
               "agente": "terreno",
               "estado": "OK",
-              "coordenadas_referencia": {
+              "punto": {
                   "latitud": lat,
                   "longitud": lon
               },
               "altitud_referencia_usuario_m": finca["altitud_referencia_m"],
-              "fuentes": fuentes,
-              "datos": {}
+              "fuentes": {},
+              "observaciones": []
           }
 
-          for nombre, url in fuentes.items():
-              try:
-                  r = requests.get(url, params={"f": "json"}, timeout=30)
-                  r.raise_for_status()
-                  data = r.json()
+          # OGC API Coverages del IGN.
+          # Se solicita únicamente una pequeña ventana alrededor del punto.
+          fuentes = {
+              "mdt_5m": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_5_PB",
+              "mdt_25m": "https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_4258_25_PB"
+          }
 
-                  resultado["datos"][nombre] = {
+          delta = 0.0005
+
+          bbox = f"{lon-delta},{lat-delta},{lon+delta},{lat+delta}"
+
+          for nombre, url in fuentes.items():
+
+              try:
+                  r = requests.get(
+                      url,
+                      params={
+                          "f": "json"
+                      },
+                      timeout=60
+                  )
+
+                  r.raise_for_status()
+
+                  metadata = r.json()
+
+                  resultado["fuentes"][nombre] = {
                       "accesible": True,
-                      "titulo": data.get("title"),
-                      "descripcion": data.get("description"),
-                      "id": data.get("id"),
-                      "extent": data.get("extent")
+                      "titulo": metadata.get("title"),
+                      "id": metadata.get("id"),
+                      "bbox_consultado": bbox
                   }
 
               except Exception as e:
-                  resultado["datos"][nombre] = {
+
+                  resultado["fuentes"][nombre] = {
                       "accesible": False,
                       "error": str(e)
                   }
 
-          with open(ROOT / "terreno.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          # Intento de consulta puntual de cobertura.
+          # El servidor puede limitar la resolución o parámetros.
+          for nombre, url in fuentes.items():
+
+              try:
+
+                  r = requests.get(
+                      url + "/coverage",
+                      params={
+                          "f": "json",
+                          "bbox": bbox,
+                          "subset": [
+                              f"Lat({lat-0.0001},{lat+0.0001})",
+                              f"Long({lon-0.0001},{lon+0.0001})"
+                          ]
+                      },
+                      timeout=60
+                  )
+
+                  if r.ok:
+
+                      try:
+                          datos = r.json()
+
+                          with open(
+                              OUT / f"{nombre}_punto.json",
+                              "w",
+                              encoding="utf-8"
+                          ) as f:
+                              json.dump(
+                                  datos,
+                                  f,
+                                  ensure_ascii=False,
+                                  indent=2
+                              )
+
+                          resultado["observaciones"].append(
+                              f"Se obtuvo respuesta de cobertura para {nombre}"
+                          )
+
+                      except Exception:
+                          resultado["observaciones"].append(
+                              f"{nombre}: respuesta no JSON"
+                          )
+
+                  else:
+                      resultado["observaciones"].append(
+                          f"{nombre}: cobertura no disponible mediante esta consulta"
+                      )
+
+              except Exception as e:
+
+                  resultado["observaciones"].append(
+                      f"{nombre}: {str(e)}"
+                  )
+
+          with open(
+              OUT / "terreno.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           print(json.dumps(resultado, ensure_ascii=False, indent=2))
           PY
@@ -135,8 +210,8 @@ jobs:
           import requests
           from pathlib import Path
 
-          ROOT = Path("expediente/parcelas")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/parcelas")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           with open("expediente/finca.json", encoding="utf-8") as f:
               finca = json.load(f)
@@ -144,55 +219,105 @@ jobs:
           lat = finca["coordenadas"]["latitud"]
           lon = finca["coordenadas"]["longitud"]
 
-          # Aproximación inicial de 500 m alrededor del punto.
-          delta_lat = 0.0045
-          delta_lon = 0.0060
+          # Conversión aproximada a UTM 30N.
+          from pyproj import Transformer
 
-          bbox = f"{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}"
+          transformer = Transformer.from_crs(
+              "EPSG:4326",
+              "EPSG:25830",
+              always_xy=True
+          )
 
-          url = "https://idena.navarra.es/ogc/wfs"
+          x, y = transformer.transform(lon, lat)
+
+          radio = finca["radio_busqueda_m"]
+
+          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
+
+          url = "https://inspire.navarra.es/services/CP/wfs"
 
           params = {
               "service": "WFS",
               "version": "2.0.0",
               "request": "GetFeature",
-              "typeNames": "IDENA:Pol_ParcelaRustica",
+              "typenames": "CP:CadastralParcel",
               "outputFormat": "application/json",
-              "srsName": "EPSG:4326",
+              "srsName": "EPSG:25830",
               "bbox": bbox,
               "count": 500
           }
 
           resultado = {
               "agente": "parcelas",
-              "estado": "OK",
-              "fuente": url,
-              "capa": "IDENA:Pol_ParcelaRustica",
-              "bbox_consultado": bbox,
-              "numero_elementos": 0,
-              "datos": []
+              "estado": "PENDIENTE",
+              "punto_wgs84": {
+                  "latitud": lat,
+                  "longitud": lon
+              },
+              "punto_utm": {
+                  "x": x,
+                  "y": y
+              },
+              "bbox_utm": bbox,
+              "numero_elementos": 0
           }
 
           try:
-              r = requests.get(url, params=params, timeout=60)
+
+              r = requests.get(
+                  url,
+                  params=params,
+                  timeout=120
+              )
+
               r.raise_for_status()
 
               data = r.json()
 
-              resultado["numero_elementos"] = len(data.get("features", []))
-              resultado["datos"] = data.get("features", [])
+              features = data.get("features", [])
 
-              with open(ROOT / "parcelas.geojson", "w", encoding="utf-8") as f:
-                  json.dump(data, f, ensure_ascii=False, indent=2)
+              resultado["numero_elementos"] = len(features)
+
+              if features:
+                  resultado["estado"] = "OK"
+
+              with open(
+                  OUT / "parcelas.geojson",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+                  json.dump(
+                      data,
+                      f,
+                      ensure_ascii=False,
+                      indent=2
+                  )
+
+              # Buscar la parcela que contiene el punto
+              # mediante consulta espacial posterior si es posible.
+              resultado["datos"] = features
 
           except Exception as e:
-              resultado["estado"] = "PENDIENTE"
+
+              resultado["estado"] = "ERROR"
               resultado["error"] = str(e)
 
-          with open(ROOT / "parcelas.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          with open(
+              OUT / "parcelas.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
-          print("Parcelas encontradas:", resultado["numero_elementos"])
+          print(
+              "Parcelas encontradas:",
+              resultado["numero_elementos"]
+          )
           PY
 
       # ============================================================
@@ -205,9 +330,10 @@ jobs:
           import json
           import requests
           from pathlib import Path
+          from pyproj import Transformer
 
-          ROOT = Path("expediente/agua")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/agua")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           with open("expediente/finca.json", encoding="utf-8") as f:
               finca = json.load(f)
@@ -215,24 +341,29 @@ jobs:
           lat = finca["coordenadas"]["latitud"]
           lon = finca["coordenadas"]["longitud"]
 
-          delta_lat = 0.009
-          delta_lon = 0.012
+          transformer = Transformer.from_crs(
+              "EPSG:4326",
+              "EPSG:25830",
+              always_xy=True
+          )
 
-          bbox = f"{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}"
+          x, y = transformer.transform(lon, lat)
+
+          radio = finca["radio_busqueda_m"]
+
+          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
 
           url = "https://idena.navarra.es/ogc/wfs"
 
           capas = {
-              "cauces": "IDENA:HIDROG_Lin_Hidroeje",
-              "superficies_agua": "IDENA:HIDROG_Pol_SuperfiAgua",
-              "hidrografia_lineal": "IDENA:CARBTA_Lin_Hidrografia",
-              "hidrografia_poligonal": "IDENA:CARBTA_Pol_Hidrografia"
+              "hidrografia_lineal": "CARBTU_Lin_Hidrografia_201",
+              "hidrografia_poligonal": "CARBTU_Pol_Hidrografia_201"
           }
 
           resultado = {
               "agente": "agua",
               "estado": "OK",
-              "bbox_consultado": bbox,
+              "bbox_utm": bbox,
               "capas": {}
           }
 
@@ -242,43 +373,310 @@ jobs:
                   "service": "WFS",
                   "version": "2.0.0",
                   "request": "GetFeature",
-                  "typeNames": capa,
+                  "typenames": capa,
                   "outputFormat": "application/json",
-                  "srsName": "EPSG:4326",
+                  "srsName": "EPSG:25830",
                   "bbox": bbox,
                   "count": 500
               }
 
               try:
-                  r = requests.get(url, params=params, timeout=60)
+
+                  r = requests.get(
+                      url,
+                      params=params,
+                      timeout=120
+                  )
+
                   r.raise_for_status()
+
                   data = r.json()
 
                   resultado["capas"][nombre] = {
                       "capa": capa,
-                      "numero_elementos": len(data.get("features", [])),
-                      "datos": data.get("features", [])
+                      "estado": "OK",
+                      "numero_elementos": len(
+                          data.get("features", [])
+                      )
                   }
 
-                  with open(ROOT / f"{nombre}.geojson", "w", encoding="utf-8") as f:
-                      json.dump(data, f, ensure_ascii=False, indent=2)
+                  with open(
+                      OUT / f"{nombre}.geojson",
+                      "w",
+                      encoding="utf-8"
+                  ) as f:
+                      json.dump(
+                          data,
+                          f,
+                          ensure_ascii=False,
+                          indent=2
+                      )
 
               except Exception as e:
+
                   resultado["capas"][nombre] = {
                       "capa": capa,
-                      "numero_elementos": 0,
-                      "estado": "PENDIENTE",
+                      "estado": "ERROR",
                       "error": str(e)
                   }
 
-          with open(ROOT / "agua.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          with open(
+              OUT / "agua.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           print("Agente agua terminado.")
           PY
 
       # ============================================================
-      # 6. AGENTE CLIMA
+      # 6. AGENTE SUELO
+      # ============================================================
+
+      - name: Crear agente suelo
+        run: |
+          cat > agentes/suelo.py <<'PY'
+          import json
+          import requests
+          from pathlib import Path
+          from pyproj import Transformer
+
+          OUT = Path("expediente/suelo")
+          OUT.mkdir(parents=True, exist_ok=True)
+
+          with open("expediente/finca.json", encoding="utf-8") as f:
+              finca = json.load(f)
+
+          lat = finca["coordenadas"]["latitud"]
+          lon = finca["coordenadas"]["longitud"]
+
+          transformer = Transformer.from_crs(
+              "EPSG:4326",
+              "EPSG:25830",
+              always_xy=True
+          )
+
+          x, y = transformer.transform(lon, lat)
+
+          radio = finca["radio_busqueda_m"]
+
+          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
+
+          url = "https://idena.navarra.es/ogc/wfs"
+
+          capas = {
+              "mapa_suelos": "EDAFOL_Pol_Suelos25m",
+              "clases_agrologicas": "AGRICU_Pol_CLAgrol25m",
+              "subclases_agrologicas": "AGRICU_Pol_SCAgrol25m",
+              "aptitud_riego": "REGADI_Pol_CLApti25m"
+          }
+
+          resultado = {
+              "agente": "suelo",
+              "estado": "OK",
+              "bbox_utm": bbox,
+              "capas": {}
+          }
+
+          for nombre, capa in capas.items():
+
+              params = {
+                  "service": "WFS",
+                  "version": "2.0.0",
+                  "request": "GetFeature",
+                  "typenames": capa,
+                  "outputFormat": "application/json",
+                  "srsName": "EPSG:25830",
+                  "bbox": bbox,
+                  "count": 500
+              }
+
+              try:
+
+                  r = requests.get(
+                      url,
+                      params=params,
+                      timeout=120
+                  )
+
+                  r.raise_for_status()
+
+                  data = r.json()
+
+                  resultado["capas"][nombre] = {
+                      "capa": capa,
+                      "estado": "OK",
+                      "numero_elementos": len(
+                          data.get("features", [])
+                      )
+                  }
+
+                  with open(
+                      OUT / f"{nombre}.geojson",
+                      "w",
+                      encoding="utf-8"
+                  ) as f:
+                      json.dump(
+                          data,
+                          f,
+                          ensure_ascii=False,
+                          indent=2
+                      )
+
+              except Exception as e:
+
+                  resultado["capas"][nombre] = {
+                      "capa": capa,
+                      "estado": "ERROR",
+                      "error": str(e)
+                  }
+
+          resultado["advertencia"] = (
+              "La cartografía de suelo no sustituye un análisis "
+              "físico-químico realizado sobre muestras de campo."
+          )
+
+          with open(
+              OUT / "suelo.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("Agente suelo terminado.")
+          PY
+
+      # ============================================================
+      # 7. AGENTE VEGETACIÓN / USO DEL SUELO
+      # ============================================================
+
+      - name: Crear agente vegetación
+        run: |
+          cat > agentes/vegetacion.py <<'PY'
+          import json
+          import requests
+          from pathlib import Path
+          from pyproj import Transformer
+
+          OUT = Path("expediente/vegetacion")
+          OUT.mkdir(parents=True, exist_ok=True)
+
+          with open("expediente/finca.json", encoding="utf-8") as f:
+              finca = json.load(f)
+
+          lat = finca["coordenadas"]["latitud"]
+          lon = finca["coordenadas"]["longitud"]
+
+          transformer = Transformer.from_crs(
+              "EPSG:4326",
+              "EPSG:25830",
+              always_xy=True
+          )
+
+          x, y = transformer.transform(lon, lat)
+
+          radio = finca["radio_busqueda_m"]
+
+          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
+
+          url = "https://idena.navarra.es/ogc/wfs"
+
+          capas = {
+              "mca_2023": "OCUPAC_Pol_MCA_VE2023"
+          }
+
+          resultado = {
+              "agente": "vegetacion",
+              "estado": "OK",
+              "bbox_utm": bbox,
+              "capas": {}
+          }
+
+          for nombre, capa in capas.items():
+
+              params = {
+                  "service": "WFS",
+                  "version": "2.0.0",
+                  "request": "GetFeature",
+                  "typenames": capa,
+                  "outputFormat": "application/json",
+                  "srsName": "EPSG:25830",
+                  "bbox": bbox,
+                  "count": 500
+              }
+
+              try:
+
+                  r = requests.get(
+                      url,
+                      params=params,
+                      timeout=120
+                  )
+
+                  r.raise_for_status()
+
+                  data = r.json()
+
+                  resultado["capas"][nombre] = {
+                      "capa": capa,
+                      "estado": "OK",
+                      "numero_elementos": len(
+                          data.get("features", [])
+                      )
+                  }
+
+                  with open(
+                      OUT / f"{nombre}.geojson",
+                      "w",
+                      encoding="utf-8"
+                  ) as f:
+                      json.dump(
+                          data,
+                          f,
+                          ensure_ascii=False,
+                          indent=2
+                      )
+
+              except Exception as e:
+
+                  resultado["capas"][nombre] = {
+                      "capa": capa,
+                      "estado": "ERROR",
+                      "error": str(e)
+                  }
+
+          resultado["fuente"] = (
+              "Mapa de Cultivos y Aprovechamientos de Navarra 2023"
+          )
+
+          with open(
+              OUT / "vegetacion.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("Agente vegetación terminado.")
+          PY
+
+      # ============================================================
+      # 8. AGENTE CLIMA
       # ============================================================
 
       - name: Crear agente clima
@@ -288,8 +686,8 @@ jobs:
           import requests
           from pathlib import Path
 
-          ROOT = Path("expediente/clima")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/clima")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           with open("expediente/finca.json", encoding="utf-8") as f:
               finca = json.load(f)
@@ -303,6 +701,13 @@ jobs:
               "latitude": lat,
               "longitude": lon,
               "current": ",".join([
+                  "temperature_2m",
+                  "relative_humidity_2m",
+                  "precipitation",
+                  "wind_speed_10m",
+                  "wind_direction_10m"
+              ]),
+              "hourly": ",".join([
                   "temperature_2m",
                   "relative_humidity_2m",
                   "precipitation",
@@ -329,183 +734,35 @@ jobs:
           }
 
           try:
-              r = requests.get(url, params=params, timeout=60)
+
+              r = requests.get(
+                  url,
+                  params=params,
+                  timeout=60
+              )
+
               r.raise_for_status()
+
               resultado["datos"] = r.json()
 
           except Exception as e:
-              resultado["estado"] = "PENDIENTE"
+
+              resultado["estado"] = "ERROR"
               resultado["error"] = str(e)
 
-          with open(ROOT / "clima.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          with open(
+              OUT / "clima.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           print("Agente clima terminado.")
-          PY
-
-      # ============================================================
-      # 7. AGENTE VEGETACIÓN
-      # ============================================================
-
-      - name: Crear agente vegetación
-        run: |
-          cat > agentes/vegetacion.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-
-          ROOT = Path("expediente/vegetacion")
-          ROOT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          delta_lat = 0.006
-          delta_lon = 0.008
-
-          bbox = f"{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "mca_2023": "IDENA:OCUPAC_Pol_MCA_VE2023",
-              "mca_2021": "IDENA:OCUPAC_Pol_MCA_VE2021",
-              "mca_2019": "IDENA:OCUPAC_Pol_MCA_VE2019"
-          }
-
-          resultado = {
-              "agente": "vegetacion",
-              "estado": "OK",
-              "bbox": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typeNames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:4326",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
-              try:
-                  r = requests.get(url, params=params, timeout=60)
-                  r.raise_for_status()
-
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "numero_elementos": len(data.get("features", [])),
-                      "datos": data.get("features", [])
-                  }
-
-                  with open(ROOT / f"{nombre}.geojson", "w", encoding="utf-8") as f:
-                      json.dump(data, f, ensure_ascii=False, indent=2)
-
-              except Exception as e:
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "PENDIENTE",
-                      "error": str(e)
-                  }
-
-          with open(ROOT / "vegetacion.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
-
-          print("Agente vegetación terminado.")
-          PY
-
-      # ============================================================
-      # 8. AGENTE SUELO
-      # ============================================================
-
-      - name: Crear agente suelo
-        run: |
-          cat > agentes/suelo.py <<'PY'
-          import json
-          import requests
-          from pathlib import Path
-
-          ROOT = Path("expediente/suelo")
-          ROOT.mkdir(parents=True, exist_ok=True)
-
-          with open("expediente/finca.json", encoding="utf-8") as f:
-              finca = json.load(f)
-
-          lat = finca["coordenadas"]["latitud"]
-          lon = finca["coordenadas"]["longitud"]
-
-          delta_lat = 0.006
-          delta_lon = 0.008
-
-          bbox = f"{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}"
-
-          url = "https://idena.navarra.es/ogc/wfs"
-
-          capas = {
-              "erosion": "IDENA:EDAFOL_Pol_Erosion",
-              "erosion_litologia": "IDENA:EDAFOL_Pol_ErosionLitologia"
-          }
-
-          resultado = {
-              "agente": "suelo",
-              "estado": "OK",
-              "bbox": bbox,
-              "capas": {}
-          }
-
-          for nombre, capa in capas.items():
-
-              params = {
-                  "service": "WFS",
-                  "version": "2.0.0",
-                  "request": "GetFeature",
-                  "typeNames": capa,
-                  "outputFormat": "application/json",
-                  "srsName": "EPSG:4326",
-                  "bbox": bbox,
-                  "count": 500
-              }
-
-              try:
-                  r = requests.get(url, params=params, timeout=60)
-                  r.raise_for_status()
-                  data = r.json()
-
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "numero_elementos": len(data.get("features", [])),
-                      "datos": data.get("features", [])
-                  }
-
-                  with open(ROOT / f"{nombre}.geojson", "w", encoding="utf-8") as f:
-                      json.dump(data, f, ensure_ascii=False, indent=2)
-
-              except Exception as e:
-                  resultado["capas"][nombre] = {
-                      "capa": capa,
-                      "estado": "PENDIENTE",
-                      "error": str(e)
-                  }
-
-          resultado["nota"] = (
-              "Estas capas aportan información territorial sobre erosión. "
-              "No sustituyen un análisis físico-químico de suelo."
-          )
-
-          with open(ROOT / "suelo.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
-
-          print("Agente suelo terminado.")
           PY
 
       # ============================================================
@@ -518,35 +775,43 @@ jobs:
           import json
           from pathlib import Path
 
-          ROOT = Path("expediente/satelite")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/satelite")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           resultado = {
               "agente": "satelite",
               "estado": "OK",
-              "fuentes_oficiales": {
-                  "pnoa_actual_historico": "https://www.ign.es/wms/pnoa-historico",
-                  "pnoa_portal": "https://pnoa.ign.es/",
-                  "teledeteccion_ign": "https://pnt.ign.es/"
+              "fuentes": {
+                  "pnoa_historico": "https://www.ign.es/wms/pnoa-historico",
+                  "pnoa_actual": "https://www.ign.es/wms-inspire/pnoa-ma",
+                  "wmts_pnoa": "https://www.ign.es/wmts/pnoa-ma"
               },
               "objetivos": [
-                  "Comparación histórica de cobertura",
-                  "Seguimiento de cambios",
-                  "Vegetación",
-                  "Uso del suelo",
-                  "Apoyo al análisis de humedad y regeneración"
-              ],
-              "nota": "La descarga raster automática de imágenes se incorporará cuando se determine la tesela exacta de la finca."
+                  "comparación histórica",
+                  "cambios de cobertura",
+                  "vegetación",
+                  "usos del suelo",
+                  "seguimiento de regeneración"
+              ]
           }
 
-          with open(ROOT / "satelite.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          with open(
+              OUT / "satelite.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           print("Agente satélite preparado.")
           PY
 
       # ============================================================
-      # 10. AGENTE NORMATIVA
+      # 10. AGENTE NORMATIVA / TERRITORIO
       # ============================================================
 
       - name: Crear agente normativa
@@ -555,9 +820,10 @@ jobs:
           import json
           import requests
           from pathlib import Path
+          from pyproj import Transformer
 
-          ROOT = Path("expediente/normativa")
-          ROOT.mkdir(parents=True, exist_ok=True)
+          OUT = Path("expediente/normativa")
+          OUT.mkdir(parents=True, exist_ok=True)
 
           with open("expediente/finca.json", encoding="utf-8") as f:
               finca = json.load(f)
@@ -565,25 +831,31 @@ jobs:
           lat = finca["coordenadas"]["latitud"]
           lon = finca["coordenadas"]["longitud"]
 
-          delta_lat = 0.006
-          delta_lon = 0.008
+          transformer = Transformer.from_crs(
+              "EPSG:4326",
+              "EPSG:25830",
+              always_xy=True
+          )
 
-          bbox = f"{lon-delta_lon},{lat-delta_lat},{lon+delta_lon},{lat+delta_lat}"
+          x, y = transformer.transform(lon, lat)
+
+          radio = finca["radio_busqueda_m"]
+
+          bbox = f"{x-radio},{y-radio},{x+radio},{y+radio}"
 
           url = "https://idena.navarra.es/ogc/wfs"
 
           capas = {
-              "municipios": "IDENA:DIADMI_Pol_Municipio",
-              "pot": "IDENA:INFOTU_Pol_MuniPot",
-              "zonificacion_navarra_2000": "IDENA:ESTADI_Pol_ZonNav2000"
+              "navarra_2000_zonas": "ESTADI_Pol_ZonNav2000",
+              "navarra_2000_areas": "ESTADI_Pol_AreaNav2000",
+              "navarra_2000_subzonas": "ESTADI_Pol_SzonNav2000"
           }
 
           resultado = {
               "agente": "normativa",
               "estado": "OK",
-              "bbox": bbox,
-              "capas": {},
-              "nota": "La información GIS sirve como identificación territorial inicial. No constituye por sí sola una interpretación jurídica."
+              "bbox_utm": bbox,
+              "capas": {}
           }
 
           for nombre, capa in capas.items():
@@ -592,36 +864,69 @@ jobs:
                   "service": "WFS",
                   "version": "2.0.0",
                   "request": "GetFeature",
-                  "typeNames": capa,
+                  "typenames": capa,
                   "outputFormat": "application/json",
-                  "srsName": "EPSG:4326",
+                  "srsName": "EPSG:25830",
                   "bbox": bbox,
-                  "count": 100
+                  "count": 500
               }
 
               try:
-                  r = requests.get(url, params=params, timeout=60)
+
+                  r = requests.get(
+                      url,
+                      params=params,
+                      timeout=120
+                  )
+
                   r.raise_for_status()
+
                   data = r.json()
 
                   resultado["capas"][nombre] = {
                       "capa": capa,
-                      "numero_elementos": len(data.get("features", [])),
-                      "datos": data.get("features", [])
+                      "estado": "OK",
+                      "numero_elementos": len(
+                          data.get("features", [])
+                      )
                   }
 
-                  with open(ROOT / f"{nombre}.geojson", "w", encoding="utf-8") as f:
-                      json.dump(data, f, ensure_ascii=False, indent=2)
+                  with open(
+                      OUT / f"{nombre}.geojson",
+                      "w",
+                      encoding="utf-8"
+                  ) as f:
+                      json.dump(
+                          data,
+                          f,
+                          ensure_ascii=False,
+                          indent=2
+                      )
 
               except Exception as e:
+
                   resultado["capas"][nombre] = {
                       "capa": capa,
-                      "estado": "PENDIENTE",
+                      "estado": "ERROR",
                       "error": str(e)
                   }
 
-          with open(ROOT / "normativa.json", "w", encoding="utf-8") as f:
-              json.dump(resultado, f, ensure_ascii=False, indent=2)
+          resultado["advertencia"] = (
+              "La cartografía territorial no constituye por sí sola "
+              "asesoramiento jurídico ni determina permisos concretos."
+          )
+
+          with open(
+              OUT / "normativa.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  resultado,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
           print("Agente normativa terminado.")
           PY
@@ -640,28 +945,37 @@ jobs:
               "terreno.py",
               "parcelas.py",
               "agua.py",
-              "clima.py",
-              "vegetacion.py",
               "suelo.py",
+              "vegetacion.py",
+              "clima.py",
               "satelite.py",
               "normativa.py"
           ]
 
-          for agente in agentes:
-              print("")
-              print("=" * 60)
-              print("EJECUTANDO:", agente)
-              print("=" * 60)
+          resultados = {}
 
-              resultado = subprocess.run(
+          for agente in agentes:
+
+              print("")
+              print("=" * 70)
+              print("EJECUTANDO:", agente)
+              print("=" * 70)
+
+              r = subprocess.run(
                   [sys.executable, "agentes/" + agente],
                   check=False
               )
 
-              print("Código de salida:", resultado.returncode)
+              resultados[agente] = r.returncode
 
           print("")
-          print("TODOS LOS AGENTES HAN TERMINADO.")
+          print("RESULTADO DE TODOS LOS AGENTES")
+
+          for agente, codigo in resultados.items():
+              print(
+                  agente,
+                  "OK" if codigo == 0 else f"ERROR {codigo}"
+              )
           PY
 
       # ============================================================
@@ -679,12 +993,12 @@ jobs:
 
           agentes = [
               "terreno",
+              "parcelas",
               "agua",
-              "clima",
               "suelo",
               "vegetacion",
+              "clima",
               "satelite",
-              "parcelas",
               "normativa"
           ]
 
@@ -693,8 +1007,8 @@ jobs:
               "agentes": {},
               "resumen": {
                   "ok": 0,
-                  "pendientes": 0,
-                  "errores": 0
+                  "errores": 0,
+                  "sin_datos": 0
               },
               "datos_faltantes": []
           }
@@ -704,18 +1018,27 @@ jobs:
               archivo = base / agente / f"{agente}.json"
 
               if not archivo.exists():
+
                   informe["agentes"][agente] = {
                       "estado": "SIN_RESULTADO"
                   }
+
                   informe["resumen"]["errores"] += 1
                   informe["datos_faltantes"].append(agente)
                   continue
 
               try:
-                  with open(archivo, encoding="utf-8") as f:
+
+                  with open(
+                      archivo,
+                      encoding="utf-8"
+                  ) as f:
                       datos = json.load(f)
 
-                  estado = datos.get("estado", "DESCONOCIDO")
+                  estado = datos.get(
+                      "estado",
+                      "DESCONOCIDO"
+                  )
 
                   informe["agentes"][agente] = {
                       "estado": estado
@@ -723,38 +1046,68 @@ jobs:
 
                   if estado == "OK":
                       informe["resumen"]["ok"] += 1
-                  elif estado == "PENDIENTE":
-                      informe["resumen"]["pendientes"] += 1
+                  elif estado == "ERROR":
+                      informe["resumen"]["errores"] += 1
                       informe["datos_faltantes"].append(agente)
                   else:
-                      informe["resumen"]["errores"] += 1
+                      informe["resumen"]["sin_datos"] += 1
+                      informe["datos_faltantes"].append(agente)
 
               except Exception as e:
+
                   informe["agentes"][agente] = {
                       "estado": "ERROR",
                       "error": str(e)
                   }
-                  informe["resumen"]["errores"] += 1
 
-          informe["conclusion"] = (
-              "El expediente ha sido generado automáticamente. "
-              "Los datos marcados como PENDIENTE requieren una fuente adicional, "
-              "una consulta más específica o información de campo."
+                  informe["resumen"]["errores"] += 1
+                  informe["datos_faltantes"].append(agente)
+
+          informe["criterio"] = (
+              "OK significa que el agente obtuvo una respuesta válida "
+              "de su fuente. No significa que exista información "
+              "suficiente para diseñar la finca."
           )
 
-          out = base / "analisis" / "informe_maestro.json"
+          informe["siguiente_fase"] = [
+              "delimitar exactamente la finca",
+              "calcular relieve",
+              "calcular pendientes",
+              "calcular orientación",
+              "identificar agua",
+              "analizar usos y vegetación",
+              "analizar suelo",
+              "analizar normativa",
+              "integrar todas las capas",
+              "preparar diseño de permacultura"
+          ]
 
-          with open(out, "w", encoding="utf-8") as f:
-              json.dump(informe, f, ensure_ascii=False, indent=2)
+          with open(
+              base / "analisis" / "informe_maestro.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  informe,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
 
-          print(json.dumps(informe, ensure_ascii=False, indent=2))
+          print(
+              json.dumps(
+                  informe,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
           PY
 
       # ============================================================
-      # 13. EJECUTAR SISTEMA
+      # 13. EJECUTAR AGENTES
       # ============================================================
 
-      - name: Ejecutar todos los agentes
+      - name: Ejecutar sistema maestro
         run: |
           python agentes/maestro.py
 
@@ -763,14 +1116,13 @@ jobs:
           python agentes/analista.py
 
       # ============================================================
-      # 14. INFORME HUMANO
+      # 14. CREAR RESUMEN
       # ============================================================
 
-      - name: Crear informe resumen
+      - name: Crear resumen de la finca
         run: |
           python - <<'PY'
           import json
-          from pathlib import Path
 
           with open(
               "expediente/analisis/informe_maestro.json",
@@ -784,87 +1136,98 @@ jobs:
               encoding="utf-8"
           ) as f:
 
-              f.write("SISTEMA MAESTRO DE LA FINCA\n")
-              f.write("============================\n\n")
+              f.write("LURRA - SISTEMA MAESTRO DE LA FINCA\n")
+              f.write("====================================\n\n")
 
               f.write(
                   "Coordenadas: 42.8962739, -1.5961049\n"
               )
+
               f.write(
-                  "Altitud de referencia: 590.1082552 m\n\n"
+                  "Altitud de referencia: 590.1082552 m\n"
               )
 
-              f.write("ESTADO DE LOS AGENTES\n")
-              f.write("---------------------\n")
+              f.write(
+                  "Radio de análisis inicial: 1000 m\n\n"
+              )
+
+              f.write("AGENTES\n")
+              f.write("=======\n")
 
               for nombre, datos in informe["agentes"].items():
                   f.write(
-                      f"{nombre}: {datos.get('estado')}\n"
+                      f"{nombre}: "
+                      f"{datos.get('estado')}\n"
                   )
 
-              f.write("\n")
-              f.write("RESUMEN\n")
-              f.write("-------\n")
-              f.write(
-                  f"OK: {informe['resumen']['ok']}\n"
-              )
-              f.write(
-                  f"Pendientes: {informe['resumen']['pendientes']}\n"
-              )
-              f.write(
-                  f"Errores: {informe['resumen']['errores']}\n"
-              )
+              f.write("\nRESUMEN\n")
+              f.write("=======\n")
 
-              f.write("\nDATOS QUE FALTAN\n")
-              f.write("----------------\n")
+              for clave, valor in informe["resumen"].items():
+                  f.write(
+                      f"{clave}: {valor}\n"
+                  )
+
+              f.write("\nDATOS FALTANTES O PROBLEMÁTICOS\n")
+              f.write("===============================\n")
 
               for dato in informe["datos_faltantes"]:
                   f.write(f"- {dato}\n")
 
-          print("Informe creado.")
+              f.write("\nSIGUIENTE FASE\n")
+              f.write("==============\n")
+
+              for paso in informe["siguiente_fase"]:
+                  f.write(f"- {paso}\n")
+          PY
 
       # ============================================================
       # 15. MAPA WEB
       # ============================================================
 
-      - name: Crear mapa de la finca
+      - name: Crear mapa web
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          with open("expediente/finca.json", encoding="utf-8") as f:
+          with open(
+              "expediente/finca.json",
+              encoding="utf-8"
+          ) as f:
               finca = json.load(f)
 
           lat = finca["coordenadas"]["latitud"]
           lon = finca["coordenadas"]["longitud"]
 
-          html = f"""<!DOCTYPE html>
+          html = f"""
+          <!DOCTYPE html>
           <html lang="es">
           <head>
           <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>Lurra - Expediente de la finca</title>
+          <meta name="viewport"
+                content="width=device-width,initial-scale=1">
+          <title>Lurra - Finca de permacultura</title>
 
           <link rel="stylesheet"
-          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
           <style>
-          html,body,#map {{
-            height:100%;
-            margin:0;
+          html, body, #map {{
+              height:100%;
+              margin:0;
           }}
 
           #info {{
-            position:absolute;
-            z-index:1000;
-            top:10px;
-            left:10px;
-            background:white;
-            padding:12px;
-            border-radius:8px;
-            font-family:Arial;
-            box-shadow:0 2px 8px rgba(0,0,0,.25);
+              position:absolute;
+              z-index:1000;
+              top:10px;
+              left:10px;
+              background:white;
+              padding:14px;
+              border-radius:8px;
+              font-family:Arial,sans-serif;
+              box-shadow:0 2px 10px rgba(0,0,0,.3);
           }}
           </style>
           </head>
@@ -872,10 +1235,11 @@ jobs:
           <body>
 
           <div id="info">
-          <b>Lurra - Finca de permacultura</b><br>
-          Latitud: {lat}<br>
-          Longitud: {lon}<br>
-          Altitud referencia: {finca["altitud_referencia_m"]} m
+            <b>LURRA</b><br>
+            Finca de permacultura<br><br>
+            Latitud: {lat}<br>
+            Longitud: {lon}<br>
+            Altitud referencia: {finca["altitud_referencia_m"]} m
           </div>
 
           <div id="map"></div>
@@ -887,25 +1251,29 @@ jobs:
           const lat = {lat};
           const lon = {lon};
 
-          const map = L.map('map').setView([lat,lon],15);
+          const map = L.map("map").setView(
+              [lat, lon],
+              15
+          );
 
           L.tileLayer(
-            'https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
-            {{
-              attribution:'&copy; OpenStreetMap contributors'
-            }}
+              "https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
+              {{
+                  attribution:
+                    "&copy; OpenStreetMap contributors"
+              }}
           ).addTo(map);
 
-          L.marker([lat,lon])
+          L.marker([lat, lon])
             .addTo(map)
             .bindPopup(
-              '<b>Punto de referencia de la finca</b><br>' +
-              lat + ', ' + lon
+              "<b>Punto de referencia de la finca</b><br>" +
+              lat + ", " + lon
             )
             .openPopup();
 
           L.circle(
-            [lat,lon],
+            [lat, lon],
             {{
               radius:1000,
               fill:false
@@ -918,29 +1286,32 @@ jobs:
           </html>
           """
 
-          Path("public/index.html").write_text(
+          Path(
+              "public/index.html"
+          ).write_text(
               html,
               encoding="utf-8"
           )
+          PY
 
       # ============================================================
-      # 16. PUBLICAR MAPA
+      # 16. GITHUB PAGES
       # ============================================================
 
-      - name: Preparar GitHub Pages
+      - name: Preparar página
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Publicar GitHub Pages
+      - name: Desplegar página
         id: deployment
         uses: actions/deploy-pages@v4
 
       # ============================================================
-      # 17. GUARDAR TODO EL EXPEDIENTE
+      # 17. GUARDAR RESULTADOS
       # ============================================================
 
-      - name: Guardar expediente completo
+      - name: Guardar expediente
         uses: actions/upload-artifact@v4
         with:
           name: expediente-finca-lurra-completo
