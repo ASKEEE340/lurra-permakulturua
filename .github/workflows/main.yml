@@ -391,5 +391,174 @@ jobs:
       - name: Guardar agentes
         uses: actions/upload-artifact@v4
         with:
-          name: agentes-finca-lurra-final
+          name: agentes-finca-lurra-final<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:kml="http://www.opengis.net/kml/2.2" xmlns:atom="http://www.w3.org/2005/Atom">
+<Document id="1VXnOCWqjfSgDVg9BO8GdExd4WEwrw9nS">
+	<name>2026 LR UDA</name>
+	<gx:CascadingStyle kml:id="__managed_style_04D880396441FB31814C_highlight">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/simple_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<scale>1.2</scale>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff007cf5</color>
+				<width>1.375</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>00000000</color>
+			</PolyStyle>
+			<BalloonStyle>
+				<gx:displayMode>panel</gx:displayMode>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<StyleMap id="__managed_style_04D880396441FB31814C">
+		<Pair>
+			<key>normal</key>
+			<styleUrl>#__managed_style_04D880396441FB31814C_normal</styleUrl>
+		</Pair>
+		<Pair>
+			<key>highlight</key>
+			<styleUrl>#__managed_style_04D880396441FB31814C_highlight</styleUrl>
+		</Pair>
+	</StyleMap>
+	<gx:CascadingStyle kml:id="__managed_style_04D880396441FB31814C_normal">
+		<styleUrl>https://earth.google.com/balloon_components/base/1.1.0.0/simple_template.kml#main</styleUrl>
+		<Style>
+			<IconStyle>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff007cf5</color>
+				<width>0.916667</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>00000000</color>
+			</PolyStyle>
+			<BalloonStyle>
+				<gx:displayMode>panel</gx:displayMode>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<gx:CascadingStyle kml:id="__managed_style_092B8E4D4641FB2C73D7_normal">
+		<Style>
+			<IconStyle>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>3.66667</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<gx:CascadingStyle kml:id="__managed_style_092B8E4D4641FB2C73D7_highlight">
+		<Style>
+			<IconStyle>
+				<scale>1.2</scale>
+				<Icon>
+					<href>https://earth.google.com/earth/document/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>5.5</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<StyleMap id="__managed_style_092B8E4D4641FB2C73D7">
+		<Pair>
+			<key>normal</key>
+			<styleUrl>#__managed_style_092B8E4D4641FB2C73D7_normal</styleUrl>
+		</Pair>
+		<Pair>
+			<key>highlight</key>
+			<styleUrl>#__managed_style_092B8E4D4641FB2C73D7_highlight</styleUrl>
+		</Pair>
+	</StyleMap>
+	<GroundOverlay id="583e4f44-6072-44ed-9dd0-5a37a2afc81d">
+		<name>Curvas de nivel sin título</name>
+		<LookAt>
+			<longitude>-1.596177184636417</longitude>
+			<latitude>42.89626155206329</latitude>
+			<altitude>589.3324879747842</altitude>
+			<heading>144.9281834239326</heading>
+			<tilt>1.682315579071723</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>251.7516771387091</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_092B8E4D4641FB2C73D7</styleUrl>
+		<Icon>
+			<href>data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==</href>
+		</Icon>
+		<LatLonBox>
+			<north>85</north>
+			<south>-85</south>
+			<east>180</east>
+			<west>-180</west>
+		</LatLonBox>
+		<gx:MapTilePyramid>
+			<Link>
+				<href>earthdatalayer:0:CAYSJDcxMWQ3ZDQ5LWNkNjYtNGU0Yi04NGQwLTg5MjNkOGFhMGI1Zg</href>
+			</Link>
+			<gx:minLevel>0</gx:minLevel>
+			<gx:maxLevel>22</gx:maxLevel>
+		</gx:MapTilePyramid>
+	</GroundOverlay>
+	<Placemark id="0BB066A74540ACF862C3">
+		<name>2026 LURRA</name>
+		<LookAt>
+			<longitude>-1.596359802699618</longitude>
+			<latitude>42.89643321608213</latitude>
+			<altitude>589.1625939207714</altitude>
+			<heading>115.6317891780232</heading>
+			<tilt>0</tilt>
+			<gx:fovy>30.00002226574772</gx:fovy>
+			<range>410.6313626156043</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_04D880396441FB31814C</styleUrl>
+		<Polygon>
+			<outerBoundaryIs>
+				<LinearRing>
+					<coordinates>
+						-1.596431197218195,42.8968811808051,0 -1.596419122461621,42.89671664408164,0 -1.596417388715594,42.89663139381292,0 -1.596391107977928,42.89656291603366,0 -1.596312307142042,42.89633288164908,0 -1.596533407747146,42.89626720394415,0 -1.596628427351301,42.89623473699322,0 -1.596689088413235,42.89620962277233,0 -1.596696679394738,42.89618990559035,0 -1.596658020534545,42.89610877173172,0 -1.596332956684637,42.89576240136823,0 -1.59626531940508,42.89569443903466,0 -1.596107067682474,42.89577054664129,0 -1.595907295118593,42.89586756640147,0 -1.595758779237829,42.89591882794478,0 -1.596059672721568,42.89616500769569,0 -1.595851356400495,42.89631416046074,0 -1.595947449480188,42.89639274547473,0 -1.595951726480532,42.89639547208808,0 -1.595610189094819,42.89664924771686,0 -1.595591114087875,42.89665794963233,0 -1.595618407888095,42.89667388391324,0 -1.59567945240036,42.89670180403568,0 -1.595766305559175,42.89674833022713,0 -1.59593872384984,42.89684225847299,0 -1.595982016240013,42.89686324925874,0 -1.596148017644925,42.89687785146882,0 -1.596298573789157,42.89688214238888,0 -1.596431197218195,42.8968811808051,0 
+					</coordinates>
+				</LinearRing>
+			</outerBoundaryIs>
+		</Polygon>
+	</Placemark>
+</Document>
+</kml>
+
           path: agentes/
