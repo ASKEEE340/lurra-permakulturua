@@ -37,7 +37,7 @@ jobs:
           KML
 
       - name: Instalar dependencias
-        run: python -m pip install --disable-pip-version-check requests pyproj "shapely>=2" rasterio
+        run: python -m pip install --disable-pip-version-check requests pyproj "shapely>=2" rasterio numpy scikit-image
 
       - name: Crear agente maestro
         run: |
@@ -51,7 +51,7 @@ jobs:
 
           import requests
           from pyproj import Geod, Transformer
-          from shapely.geometry import MultiPolygon, Point, Polygon, mapping, shape
+          from shapely.geometry import LineString, MultiPolygon, Polygon, mapping, shape
           from shapely.ops import transform as shp_transform, unary_union
 
           ROOT = Path(__file__).resolve().parents[1]
@@ -75,9 +75,9 @@ jobs:
               ('vegetacion', 'OCUPAC_Pol_MCA_VE2023', 'vegetacion'),
               ('suelo', 'EDAFOL_Pol_Suelos25m', 'suelo'),
               ('agricultura', 'AGRICU_Pol_CLAgrol25m', 'suelo'),
-              ('regulacion', 'ESTADI_Pol_ZonNav2000', 'normativa'),
-              ('regulacion_area', 'ESTADI_Pol_AreaNav2000', 'normativa'),
-              ('regulacion_subzona', 'ESTADI_Pol_SzonNav2000', 'normativa'),
+              ('zonificacion', 'ESTADI_Pol_ZonNav2000', 'zonificacion'),
+              ('zonificacion_area', 'ESTADI_Pol_AreaNav2000', 'zonificacion'),
+              ('zonificacion_subzona', 'ESTADI_Pol_SzonNav2000', 'zonificacion'),
           ]
 
 
@@ -170,36 +170,93 @@ jobs:
               return {'estado': 'OK', 'resumen': resumen}
 
 
-          # ---------- Elevacion ----------
-          def agent_elevacion(poly, poly_utm):
+          # ---------- Terreno: MDT 5 m del IGN (descarga, pendiente, orientacion, curvas) ----------
+          def agent_terreno(poly_utm):
+              import numpy as np
+              import rasterio
+              from rasterio.features import geometry_mask
+              from skimage.measure import find_contours
+
+              pad = 25
               minx, miny, maxx, maxy = poly_utm.bounds
-              paso = 30
-              while True:
-                  pts = []
-                  x = minx
-                  while x <= maxx:
-                      y = miny
-                      while y <= maxy:
-                          if poly_utm.contains(Point(x, y)):
-                              pts.append((x, y))
-                          y += paso
-                      x += paso
-                  if len(pts) <= 100:
-                      break
-                  paso += 10
-              if len(pts) < 3:
-                  raise RuntimeError('Muy pocos puntos de muestreo dentro de la finca')
-              lonlat = [TO_WGS(x, y) for x, y in pts]
-              r = http('GET', 'https://api.open-meteo.com/v1/elevation', params={
-                  'latitude': ','.join(f'{b:.6f}' for a, b in lonlat),
-                  'longitude': ','.join(f'{a:.6f}' for a, b in lonlat)}).json()
-              el = r['elevation']
-              datos = {'puntos': len(el), 'paso_m': paso, 'min_m': min(el), 'max_m': max(el),
-                       'media_m': sum(el) / len(el), 'muestras': [{'lon': a, 'lat': b, 'z': z} for (a, b), z in zip(lonlat, el)]}
-              write_json(EXP / 'terreno' / 'elevacion.json', datos)
-              resumen = (f"{len(el)} puntos de muestreo; altitud {min(el):.0f}-{max(el):.0f} m (media {datos['media_m']:.0f} m, "
-                         f"punto de referencia {ALT_REF:.0f} m). Aviso: el modelo es de ~90 m, solo da el relieve general; "
-                         f"para pendiente real hace falta el MDT de 5 m del IGN.")
+              r = http('GET', 'https://api-coverages.idee.es/collections/EL.ElevationGridCoverage_25830_5_PB/coverage',
+                       params={'subset': f'x({minx - pad}:{maxx + pad}),y({miny - pad}:{maxy + pad})', 'f': 'COG'})
+              out = EXP / 'terreno'
+              out.mkdir(parents=True, exist_ok=True)
+              raw = out / 'mdt5m_descarga.tif'
+              raw.write_bytes(r.content)
+
+              with rasterio.open(raw) as src:
+                  elev = src.read(1).astype('float64')
+                  tr, meta, nod = src.transform, src.meta.copy(), src.nodata
+              if nod is not None:
+                  elev[elev == nod] = np.nan
+              elev[elev < -1000] = np.nan
+
+              # Pendiente y orientacion sobre toda la ventana descargada (con margen), y despues se recorta a la finca.
+              # Asi las celdas del borde de la finca tambien tienen valor.
+              dzdy, dzdx = np.gradient(elev, abs(tr.e), abs(tr.a))
+              slope = np.degrees(np.arctan(np.hypot(dzdx, dzdy)))
+              aspect = (np.degrees(np.arctan2(-dzdx, dzdy)) + 360) % 360
+              dentro = geometry_mask([mapping(poly_utm)], out_shape=elev.shape, transform=tr, invert=True)
+              ok = dentro & np.isfinite(elev) & np.isfinite(slope)
+              if ok.sum() < 10:
+                  raise RuntimeError('El MDT descargado no cubre la finca')
+
+              def guardar(nombre, arr):
+                  m = meta.copy()
+                  m.update(driver='GTiff', dtype='float32', count=1, nodata=-9999, compress='deflate')
+                  with rasterio.open(out / nombre, 'w', **m) as d:
+                      d.write(np.where(ok, np.nan_to_num(arr, nan=-9999), -9999).astype('float32'), 1)
+              guardar('mdt5m_finca.tif', elev)
+              guardar('pendiente_grados.tif', slope)
+              guardar('orientacion_grados.tif', aspect)
+
+              z, s = elev[ok], slope[ok]
+              pct = np.tan(np.radians(s)) * 100
+              clases = [('<5', s < 5), ('5-10', (s >= 5) & (s < 10)), ('10-15', (s >= 10) & (s < 15)), ('>=15', s >= 15)]
+              reparto = ', '.join(f'{n} grados: {m.mean() * 100:.0f}%' for n, m in clases)
+              nombres = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO']
+              a = aspect[ok][s >= 2]
+              if a.size:
+                  idx = ((a + 22.5) // 45 % 8).astype(int)
+                  cuentas = np.bincount(idx, minlength=8)
+                  orden = np.argsort(cuentas)[::-1]
+                  orient = ', '.join(f'{nombres[i]} {cuentas[i] / a.size * 100:.0f}%' for i in orden[:2] if cuentas[i])
+              else:
+                  orient = 'terreno casi llano'
+
+              # Curvas de nivel (multiplos de 1 m y de 5 m) recortadas a la finca
+              relleno = np.where(np.isfinite(elev), elev, np.nanmean(elev))
+              for intervalo, etiqueta in ((1, 'curvas 1 m'), (5, 'curvas 5 m')):
+                  feats = []
+                  for nivel in range(int(np.floor(z.min())), int(np.ceil(z.max())) + 1):
+                      if nivel % intervalo:
+                          continue
+                      for c in find_contours(relleno, nivel):
+                          if len(c) < 2:
+                              continue
+                          coords = [(tr.c + (col + 0.5) * tr.a, tr.f + (row + 0.5) * tr.e) for row, col in c]
+                          linea = LineString(coords).intersection(poly_utm)
+                          if linea.is_empty or 'Line' not in linea.geom_type or linea.length < 1:
+                              continue
+                          feats.append({'type': 'Feature', 'properties': {'elevacion_m': float(nivel)},
+                                        'geometry': mapping(shp_transform(TO_WGS, linea))})
+                  fc = {'type': 'FeatureCollection', 'features': feats}
+                  write_json(out / (etiqueta.replace(' ', '_') + '.geojson'), fc)
+                  if intervalo == 5:
+                      MAPA_CAPAS['terreno: ' + etiqueta] = fc
+
+              datos = {'fuente': 'IGN MDT 5 m (IDEE api-coverages)', 'celdas_finca': int(ok.sum()),
+                       'alt_min': float(z.min()), 'alt_max': float(z.max()), 'alt_media': float(z.mean()),
+                       'pendiente_media_grados': float(s.mean()), 'pendiente_media_pct': float(pct.mean()),
+                       'pendiente_max_grados': float(s.max())}
+              write_json(out / 'topografia.json', datos)
+              resumen = (f"MDT de 5 m del IGN: {int(ok.sum())} celdas dentro de la finca\n"
+                         f"- Altitud {z.min():.1f}-{z.max():.1f} m (media {z.mean():.1f}); desnivel {z.max() - z.min():.1f} m\n"
+                         f"- Pendiente media {s.mean():.1f} grados ({pct.mean():.0f}%), maxima {s.max():.1f} grados\n"
+                         f"- Reparto de la superficie por pendiente: {reparto}\n"
+                         f"- Orientacion (hacia donde mira la ladera): {orient}")
               return {'estado': 'OK', 'resumen': resumen}
 
 
@@ -216,19 +273,19 @@ jobs:
 
 
           def resumir_props(props):
-              items = [(k, v) for k, v in props.items() if v not in (None, '') and not k.startswith('interseccion')][:6]
+              ocultar = {'FEATURE', 'CRECINTO', 'GEOM_AREA', 'GEOM_PERI', 'BEGINLIFE', 'CGRUPO', 'CZONA', 'CSUBZONA', 'CAREA'}
+              items = [(k, v) for k, v in props.items() if v not in (None, '') and k not in ocultar and not k.startswith('interseccion')][:6]
               return '; '.join(f'{k}={str(v)[:50]}' for k, v in items)
 
 
           def agent_wfs(nombre, capa, carpeta, poly_utm):
               if CAPAS_SERVIDOR and capa not in CAPAS_SERVIDOR:
                   return {'estado': 'ERROR', 'resumen': f'La capa {capa} no aparece en el GetCapabilities (ver idena-capas-disponibles.txt)'}
-              minx, miny, maxx, maxy = poly_utm.bounds
+              minx, miny, maxx, maxy = shp_transform(TO_WGS, poly_utm).bounds
               r = http('GET', WFS_URL, params={
                   'service': 'WFS', 'version': '2.0.0', 'request': 'GetFeature',
                   'typeNames': 'IDENA:' + capa, 'outputFormat': 'application/json',
-                  'srsName': 'EPSG:25830',
-                  'bbox': f'{minx},{miny},{maxx},{maxy},urn:ogc:def:crs:EPSG::25830',
+                  'srsName': 'EPSG:4326', 'bbox': f'{minx},{miny},{maxx},{maxy},EPSG:4326',
                   'count': 1000})
               try:
                   data = r.json()
@@ -381,7 +438,7 @@ jobs:
               geom = agent_geometria(poly, poly_utm)
 
               resultados = [ejecutar('clima', agent_clima),
-                            ejecutar('elevacion', agent_elevacion, poly, poly_utm),
+                            ejecutar('terreno (MDT 5 m)', agent_terreno, poly_utm),
                             ejecutar('idena-capas', agent_capacidades)]
               for nombre, capa, carpeta in CAPAS:
                   resultados.append(ejecutar(f'{nombre}: {capa}', agent_wfs, nombre, capa, carpeta, poly_utm))
