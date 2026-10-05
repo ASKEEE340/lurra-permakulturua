@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   analisis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -337,6 +337,7 @@ jobs:
 
           # ---------- Satelite: NDVI real ----------
           def agent_satelite(poly):
+              import numpy as np
               import rasterio
               from rasterio.mask import mask
 
@@ -354,35 +355,41 @@ jobs:
               with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR', GDAL_HTTP_MAX_RETRY='3', GDAL_HTTP_RETRY_DELAY='2'):
                   for it in items[:3]:
                       try:
-                          bandas = {}
+                          dn = {}
                           for clave in ('red', 'nir'):
-                              a = it['assets'][clave]
-                              with rasterio.open(a['href']) as ds:
+                              with rasterio.open(it['assets'][clave]['href']) as ds:
                                   to_ds = Transformer.from_crs('EPSG:4326', ds.crs, always_xy=True).transform
-                                  arr, _ = mask(ds, [mapping(shp_transform(to_ds, poly))], crop=True, all_touched=True, nodata=0)
-                              rb = (a.get('raster:bands') or [{}])[0]
-                              bandas[clave] = (arr[0].astype('float64'), rb.get('scale', 0.0001), rb.get('offset', -0.1))
-                          red, sr, orr = bandas['red']
-                          nir, sn, onn = bandas['nir']
-                          valido = (red > 0) & (nir > 0)
+                                  arr, _ = mask(ds, [mapping(shp_transform(to_ds, poly))], crop=True, all_touched=False, nodata=0)
+                              dn[clave] = arr[0].astype('float64')
+                          valido = (dn['red'] > 0) & (dn['nir'] > 0)
                           if valido.sum() < 10:
                               raise RuntimeError('Pocos pixeles validos dentro de la finca')
-                          rr = red[valido] * sr + orr
-                          nn = nir[valido] * sn + onn
-                          ndvi = (nn - rr) / (nn + rr)
+                          r_dn, n_dn = dn['red'][valido], dn['nir'][valido]
+                          # Segun la escena, los valores llevan un desplazamiento de +1000 o no.
+                          # Se detecta con los propios datos: con desplazamiento, ningun pixel normal baja de 1000.
+                          offset = 1000.0 if np.percentile(r_dn, 1) >= 1000 else 0.0
+                          rr = (r_dn - offset) * 0.0001
+                          nn = (n_dn - offset) * 0.0001
+                          den = nn + rr
+                          ok = den > 0
+                          ndvi = (nn[ok] - rr[ok]) / den[ok]
+                          if ndvi.size < 10 or not (-1 <= float(ndvi.mean()) <= 1):
+                              raise RuntimeError(f'NDVI fuera de rango (media {float(ndvi.mean()):.2f}); escena descartada')
                           resultados.append({'escena': it['id'], 'fecha': it['properties']['datetime'][:10],
                                              'nubes_pct': it['properties'].get('eo:cloud_cover'),
-                                             'pixeles': int(valido.sum()), 'ndvi_medio': float(ndvi.mean()),
-                                             'ndvi_min': float(ndvi.min()), 'ndvi_max': float(ndvi.max())})
+                                             'pixeles': int(ndvi.size), 'ndvi_medio': float(ndvi.mean()),
+                                             'ndvi_p5': float(np.percentile(ndvi, 5)), 'ndvi_p95': float(np.percentile(ndvi, 95)),
+                                             'desplazamiento_aplicado': offset,
+                                             'dn_rojo_p1': float(np.percentile(r_dn, 1)), 'dn_nir_mediana': float(np.median(n_dn))})
                       except Exception as e:
                           resultados.append({'escena': it['id'], 'error': f'{type(e).__name__}: {str(e)[:150]}'})
               write_json(EXP / 'satelite' / 'ndvi.json', resultados)
               buenos = [x for x in resultados if 'ndvi_medio' in x]
               if not buenos:
-                  return {'estado': 'ERROR', 'resumen': 'Hay escenas pero no se pudo leer ninguna: ' + resultados[0].get('error', '')}
-              lineas = [f"- {x['fecha']}: NDVI medio {x['ndvi_medio']:.2f} (rango {x['ndvi_min']:.2f} a {x['ndvi_max']:.2f}), "
+                  return {'estado': 'ERROR', 'resumen': 'Hay escenas pero no se pudo calcular un NDVI valido: ' + resultados[0].get('error', '')}
+              lineas = [f"- {x['fecha']}: NDVI medio {x['ndvi_medio']:.2f} (90% de los pixeles entre {x['ndvi_p5']:.2f} y {x['ndvi_p95']:.2f}), "
                         f"nubes {x['nubes_pct']:.0f}%, {x['pixeles']} pixeles de 10 m" for x in buenos]
-              return {'estado': 'OK', 'resumen': 'NDVI calculado sobre la finca (Sentinel-2)\n' + '\n'.join(lineas)}
+              return {'estado': 'OK', 'resumen': 'NDVI sobre la finca (Sentinel-2, pixeles de 10 m con el centro dentro de la finca; los de borde pueden mezclar con el entorno)\n' + '\n'.join(lineas)}
 
 
           # ---------- Salida ----------
@@ -497,7 +504,7 @@ jobs:
   despliegue:
     needs: analisis
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.publicar_pagina }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
